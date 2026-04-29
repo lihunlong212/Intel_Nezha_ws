@@ -1,0 +1,13 @@
+# Python byte-code caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Build artifacts
+build/
+devel/
+install/
+logs/
+
+# pytest caches
+.pytest_cache/

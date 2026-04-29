@@ -1,0 +1,33 @@
+<launch>
+  <!-- ================================================================
+       cargo_handler.launch
+       Launches the cargo visual-recognition and grasp/delivery system.
+       ================================================================ -->
+
+  <!-- ── Vision node ──────────────────────────────────────────────── -->
+  <node name="cargo_vision_node"
+        pkg="cargo_handler"
+        type="cargo_vision_node.py"
+        output="screen"
+        respawn="true">
+    <!-- Identifier used in CargoDetection messages -->
+    <param name="cargo_id"           value="cargo_1"/>
+    <!-- Set to false to skip publishing the annotated debug image -->
+    <param name="publish_debug_image" value="true"/>
+    <!-- Remap to your actual camera topic -->
+    <remap from="/camera/image_raw" to="/camera/image_raw"/>
+  </node>
+
+  <!-- ── Grasp / Delivery state-machine node ──────────────────────── -->
+  <node name="grasp_delivery_node"
+        pkg="cargo_handler"
+        type="grasp_delivery_node.py"
+        output="screen"
+        respawn="true">
+    <!-- Pixel radius inside which the drone is considered aligned -->
+    <param name="alignment_dead_zone_px" value="20.0"/>
+    <!-- Proportional gain: metres of correction per pixel of offset -->
+    <param name="alignment_kp_xy"        value="0.001"/>
+  </node>
+
+</launch>
