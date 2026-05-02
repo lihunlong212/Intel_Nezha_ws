@@ -119,16 +119,10 @@ public:
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
-  using RouteId = std::uint8_t;
-
-  void routeChoiceCallback(const std_msgs::msg::UInt8::SharedPtr msg);
-  std::unordered_map<RouteId, std::vector<Target>> buildRoutes() const;
-  void loadRoute(RouteId route_id, const std::vector<Target> & route);
+  std::vector<Target> buildRoute() const;
+  void loadRoute(const std::vector<Target> & route);
 
   std::shared_ptr<RouteTargetPublisherNode> route_node_;
-  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr route_choice_sub_;
-  std::unordered_map<RouteId, std::vector<Target>> routes_;
-  bool route_locked_;
 };
 
 }  // namespace activity_control_pkg

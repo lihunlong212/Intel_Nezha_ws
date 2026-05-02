@@ -34,7 +34,6 @@ public:
 private:
   void lookupTransform();
   void processTfTransform(const geometry_msgs::msg::TransformStamped & transform);
-  void routeChoiceCallback(const std_msgs::msg::UInt8::SharedPtr msg);
   void velocityCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
   void targetVelocityCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
   Eigen::Vector3d transformVelocity(const Eigen::Vector3d & linear, double yaw);
@@ -56,7 +55,6 @@ private:
   std::string target_frame_;
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr velocity_sub_;
-  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr route_choice_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr visual_aligned_apriltag_code_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr mission_complete_sub_;

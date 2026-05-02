@@ -500,83 +500,34 @@ RouteTestNode::RouteTestNode(
   const std::shared_ptr<RouteTargetPublisherNode> & route_node,
   const rclcpp::NodeOptions & options)
 : rclcpp::Node("route_test_node", options),
-  route_node_(route_node),
-  route_locked_(false)
+  route_node_(route_node)
 {
   std::setlocale(LC_ALL, "");
 
-  routes_ = buildRoutes();
-  route_choice_sub_ = create_subscription<std_msgs::msg::UInt8>(
-    "/route_choice",
-    rclcpp::QoS(10),
-    std::bind(&RouteTestNode::routeChoiceCallback, this, std::placeholders::_1));
+  const auto route = buildRoute();
+  if (route.empty()) {
+    RCLCPP_ERROR(get_logger(), "Default route is empty. Nothing to load.");
+    return;
+  }
 
-  RCLCPP_INFO(
-    get_logger(),
-    "Route selection node is waiting on /route_choice. Available routes: %zu",
-    routes_.size());
+  loadRoute(route);
 }
 
-void RouteTestNode::routeChoiceCallback(const std_msgs::msg::UInt8::SharedPtr msg)
+std::vector<Target> RouteTestNode::buildRoute() const
 {
-  const RouteId route_id = msg->data;
-  if (route_locked_) {
-    RCLCPP_INFO(
-      get_logger(),
-      "Ignoring /route_choice=%u because a route is already active or has already started.",
-      static_cast<unsigned>(route_id));
-    return;
-  }
-
-  const auto route_it = routes_.find(route_id);
-  if (route_it == routes_.end()) {
-    RCLCPP_WARN(
-      get_logger(),
-      "Received unsupported /route_choice=%u. Route will not start.",
-      static_cast<unsigned>(route_id));
-    return;
-  }
-
-  if (route_it->second.empty()) {
-    RCLCPP_WARN(
-      get_logger(),
-      "Received /route_choice=%u, but the route is empty. Ignoring.",
-      static_cast<unsigned>(route_id));
-    return;
-  }
-
-  loadRoute(route_id, route_it->second);
-}
-
-std::unordered_map<RouteTestNode::RouteId, std::vector<Target>> RouteTestNode::buildRoutes() const
-{
-  std::unordered_map<RouteId, std::vector<Target>> routes;
-
-  routes.emplace(RouteId{1}, std::vector<Target>{
+  return std::vector<Target>{
     Target{0.0, 0.0, 130.0, 0.0, false},
     Target{125.0, 100.0, 130.0, 0.0, true},
     Target{0.0, 0.0, 130.0, 0.0, false},
     Target{0.0, 0.0, 0.0, 0.0, false},
-  });
-
-  routes.emplace(RouteId{2}, std::vector<Target>{
-    Target{0.0, 0.0, 130.0, 0.0, false},
-    Target{125.0, -100.0, 130.0, 0.0, true},
-    Target{0.0, 0.0, 130.0, 0.0, false},
-    Target{0.0, 0.0, 0.0, 0.0, false},
-  });
-
-  return routes;
+  };
 }
 
-void RouteTestNode::loadRoute(RouteId route_id, const std::vector<Target> & route)
+void RouteTestNode::loadRoute(const std::vector<Target> & route)
 {
-  route_locked_ = true;
-
   RCLCPP_INFO(
     get_logger(),
-    "Received /route_choice=%u. Loading route with %zu targets.",
-    static_cast<unsigned>(route_id),
+    "Loading default route with %zu targets.",
     route.size());
 
   for (std::size_t index = 0; index < route.size(); ++index) {
@@ -584,8 +535,7 @@ void RouteTestNode::loadRoute(RouteId route_id, const std::vector<Target> & rout
     route_node_->addTarget(target);
     RCLCPP_INFO(
       get_logger(),
-      "Loaded route %u target %zu/%zu: x=%.1f y=%.1f z=%.1f yaw=%.1f takeover=%s",
-      static_cast<unsigned>(route_id),
+      "Loaded target %zu/%zu: x=%.1f y=%.1f z=%.1f yaw=%.1f takeover=%s",
       index + 1,
       route.size(),
       target.x_cm,
@@ -598,8 +548,7 @@ void RouteTestNode::loadRoute(RouteId route_id, const std::vector<Target> & rout
   const auto current = route_node_->currentIndex();
   RCLCPP_INFO(
     get_logger(),
-    "Route %u is now active. Current target index=%zu",
-    static_cast<unsigned>(route_id),
+    "Route is now active. Current target index=%zu",
     (current == std::numeric_limits<std::size_t>::max() ? 0 : current + 1));
 }
 
