@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# ROS / colcon build outputs
+build/
+install/
+log/
+
+# Local tooling
+.vscode/
+.idea/
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db

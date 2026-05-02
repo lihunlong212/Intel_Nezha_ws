@@ -1,0 +1,6 @@
+target_domain_id: "0"
+tasks:
+  "*":
+    package: "my_launch"
+    launch_file: "demo1.launch.py"
+    args: []

@@ -1,0 +1,14 @@
+string task_id
+string item
+int32 quantity
+string src_location
+string dst_location
+---
+bool success
+string task_id
+string final_state
+string detail
+---
+string current_state
+float32 progress
+string detail
