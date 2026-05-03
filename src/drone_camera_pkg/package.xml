@@ -3,7 +3,7 @@
 <package format="3">
   <name>drone_camera_pkg</name>
   <version>0.0.0</version>
-  <description>Realtime camera preview, AprilTag detection, and topic publishing.</description>
+  <description>Realtime camera preview, black circle detection, and topic publishing.</description>
   <maintainer email="orangepi@todo.todo">orangepi</maintainer>
   <license>Apache-2.0</license>
 
@@ -12,6 +12,8 @@
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>opencv</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

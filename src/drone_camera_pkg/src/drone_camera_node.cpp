@@ -2,20 +2,18 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <opencv2/aruco.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
 
 class DroneCameraNode : public rclcpp::Node
@@ -27,20 +25,15 @@ public:
     frame_width_(declare_parameter<int>("frame_width", 640)),
     frame_height_(declare_parameter<int>("frame_height", 480)),
     fps_(declare_parameter<double>("fps", 15.0)),
+    show_preview_(declare_parameter<bool>("show_preview", true)),
     window_name_(declare_parameter<std::string>("window_name", "drone_camera_preview")),
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
-    apriltag_code_topic_(declare_parameter<std::string>("apriltag_code_topic", "/apriltag_code")),
-    apriltag_dictionary_name_(
-      declare_parameter<std::string>("apriltag_dictionary", "DICT_APRILTAG_36h11"))
+    black_threshold_(declare_parameter<int>("black_threshold", 80)),
+    min_circle_area_(declare_parameter<double>("min_circle_area", 200.0)),
+    min_circularity_(declare_parameter<double>("min_circularity", 0.65))
   {
     fine_data_pub_ =
       create_publisher<std_msgs::msg::Int32MultiArray>(fine_data_topic_, rclcpp::QoS(10));
-    apriltag_code_pub_ =
-      create_publisher<std_msgs::msg::Int32>(apriltag_code_topic_, rclcpp::QoS(10));
-
-    apriltag_dictionary_ = cv::aruco::getPredefinedDictionary(
-      dictionaryNameToId(apriltag_dictionary_name_));
-    detector_params_ = cv::aruco::DetectorParameters::create();
 
     if (!camera_.open(camera_device_)) {
       throw std::runtime_error("Failed to open camera device " + camera_device_);
@@ -63,11 +56,13 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Camera preview enabled. camera_device=%s fine_data_topic=%s apriltag_code_topic=%s apriltag_dictionary=%s",
+      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s black_threshold=%d min_circle_area=%.1f min_circularity=%.2f",
       camera_device_.c_str(),
+      show_preview_ ? "true" : "false",
       fine_data_topic_.c_str(),
-      apriltag_code_topic_.c_str(),
-      apriltag_dictionary_name_.c_str());
+      black_threshold_,
+      min_circle_area_,
+      min_circularity_);
   }
 
   ~DroneCameraNode() override
@@ -76,81 +71,79 @@ public:
     if (camera_.isOpened()) {
       camera_.release();
     }
-    cv::destroyAllWindows();
+    if (show_preview_) {
+      cv::destroyAllWindows();
+    }
   }
 
 private:
-  static int dictionaryNameToId(const std::string & dictionary_name)
+  void detectBlackCircleAndPublish(cv::Mat & frame)
   {
-    if (dictionary_name == "DICT_APRILTAG_16h5") {
-      return cv::aruco::DICT_APRILTAG_16h5;
-    }
-    if (dictionary_name == "DICT_APRILTAG_25h9") {
-      return cv::aruco::DICT_APRILTAG_25h9;
-    }
-    if (dictionary_name == "DICT_APRILTAG_36h10") {
-      return cv::aruco::DICT_APRILTAG_36h10;
-    }
-    if (dictionary_name == "DICT_APRILTAG_36h11") {
-      return cv::aruco::DICT_APRILTAG_36h11;
-    }
+    cv::Mat gray;
+    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    cv::GaussianBlur(gray, gray, cv::Size(5, 5), 0.0);
 
-    throw std::runtime_error("Unsupported AprilTag dictionary: " + dictionary_name);
-  }
+    cv::Mat mask;
+    const int threshold = std::max(0, std::min(black_threshold_, 255));
+    cv::threshold(gray, mask, threshold, 255, cv::THRESH_BINARY_INV);
 
-  static double contourAreaFromCorners(const std::vector<cv::Point2f> & corners)
-  {
-    if (corners.size() < 4U) {
-      return 0.0;
-    }
-    return std::abs(cv::contourArea(corners));
-  }
+    const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
 
-  void detectAprilTagAndPublish(const cv::Mat & frame)
-  {
-    std::vector<int> tag_ids;
-    std::vector<std::vector<cv::Point2f>> tag_corners;
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-    cv::aruco::detectMarkers(frame, apriltag_dictionary_, tag_corners, tag_ids, detector_params_);
-    if (tag_ids.empty()) {
-      return;
-    }
+    int best_index = -1;
+    double best_area = 0.0;
+    for (std::size_t i = 0; i < contours.size(); ++i) {
+      const double area = std::abs(cv::contourArea(contours[i]));
+      if (area < min_circle_area_) {
+        continue;
+      }
 
-    std::size_t best_index = 0;
-    double best_area = contourAreaFromCorners(tag_corners.front());
-    for (std::size_t i = 1; i < tag_corners.size(); ++i) {
-      const double area = contourAreaFromCorners(tag_corners[i]);
-      if (area > best_area) {
+      const double perimeter = cv::arcLength(contours[i], true);
+      if (perimeter <= 0.0) {
+        continue;
+      }
+
+      const double circularity = 4.0 * CV_PI * area / (perimeter * perimeter);
+      if (circularity >= min_circularity_ && area > best_area) {
         best_area = area;
-        best_index = i;
+        best_index = static_cast<int>(i);
       }
     }
 
-    const auto & best_corners = tag_corners[best_index];
-    const auto center = std::accumulate(
-      best_corners.begin(),
-      best_corners.end(),
-      cv::Point2f(0.0F, 0.0F),
-      [](const cv::Point2f & sum, const cv::Point2f & point) {
-        return cv::Point2f(sum.x + point.x, sum.y + point.y);
-      });
+    if (best_index < 0) {
+      return;
+    }
 
-    const float tag_center_x = center.x / static_cast<float>(best_corners.size());
-    const float tag_center_y = center.y / static_cast<float>(best_corners.size());
+    const cv::Moments moments = cv::moments(contours[static_cast<std::size_t>(best_index)]);
+    if (std::abs(moments.m00) <= std::numeric_limits<double>::epsilon()) {
+      return;
+    }
+
+    const float circle_center_x = static_cast<float>(moments.m10 / moments.m00);
+    const float circle_center_y = static_cast<float>(moments.m01 / moments.m00);
     const float image_center_x = static_cast<float>(frame.cols) / 2.0F;
     const float image_center_y = static_cast<float>(frame.rows) / 2.0F;
 
-    // 用户定义坐标系：上方为 x 正方向，左侧为 y 正方向。
-    const int x_offset = static_cast<int>(std::lround(image_center_y - tag_center_y));
-    const int y_offset = static_cast<int>(std::lround(image_center_x - tag_center_x));
+    const int x_offset = static_cast<int>(std::lround(image_center_y - circle_center_y));
+    const int y_offset = static_cast<int>(std::lround(image_center_x - circle_center_x));
 
     std_msgs::msg::Int32MultiArray fine_data_msg;
     fine_data_msg.data = {x_offset, y_offset};
     fine_data_pub_->publish(fine_data_msg);
 
-    std_msgs::msg::Int32 apriltag_code_msg;
-    apriltag_code_msg.data = tag_ids[best_index];
-    apriltag_code_pub_->publish(apriltag_code_msg);
+    cv::drawContours(frame, contours, best_index, cv::Scalar(0, 255, 0), 2);
+    cv::circle(
+      frame,
+      cv::Point(
+        static_cast<int>(std::lround(circle_center_x)),
+        static_cast<int>(std::lround(circle_center_y))),
+      4,
+      cv::Scalar(0, 0, 255),
+      cv::FILLED);
   }
 
   void frameTimerCallback()
@@ -169,27 +162,28 @@ private:
       }
     }
 
-    cv::imshow(window_name_, frame);
-    cv::waitKey(1);
+    detectBlackCircleAndPublish(frame);
 
-    detectAprilTagAndPublish(frame);
+    if (show_preview_) {
+      cv::imshow(window_name_, frame);
+      cv::waitKey(1);
+    }
   }
 
   std::string camera_device_;
   int frame_width_;
   int frame_height_;
   double fps_;
+  bool show_preview_;
   std::string window_name_;
   std::string fine_data_topic_;
-  std::string apriltag_code_topic_;
-  std::string apriltag_dictionary_name_;
+  int black_threshold_;
+  double min_circle_area_;
+  double min_circularity_;
 
   std::mutex frame_mutex_;
   cv::VideoCapture camera_;
-  cv::Ptr<cv::aruco::Dictionary> apriltag_dictionary_;
-  cv::Ptr<cv::aruco::DetectorParameters> detector_params_;
   rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_pub_;
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr apriltag_code_pub_;
   rclcpp::TimerBase::SharedPtr frame_timer_;
 };
 

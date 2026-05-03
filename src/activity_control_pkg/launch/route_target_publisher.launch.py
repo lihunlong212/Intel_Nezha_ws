@@ -24,9 +24,18 @@ def generate_launch_description():
         # Visual takeover gating
         "visual_align_pixel_threshold": 100.0,
         "visual_align_required_frames": 3,
-        "visual_takeover_target_height_cm": 40.0,
         "visual_takeover_timeout_sec": 5.0,
         "fine_data_stale_timeout_sec": 0.5,
+        # 抓取航点（type=2）参数
+        "pickup_align_altitude_cm": 50.0,
+        "pickup_grab_altitude_cm": 20.0,
+        "pickup_hold_at_grab_sec": 1.0,
+        "pickup_observe_sec": 1.0,
+        "pickup_max_attempts": 3,
+        "circle_lost_window_sec": 1.0,
+        # 投放航点（type=3）参数
+        "drop_altitude_cm": 50.0,
+        "drop_servo_to_magnet_sec": 1.0,
     }
 
     return LaunchDescription([
