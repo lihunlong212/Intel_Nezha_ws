@@ -25,9 +25,9 @@ def generate_launch_description() -> LaunchDescription:
         "kd_z": 0.2,                       # 高度微分增益
 
         # 输出限幅
-        "max_linear_velocity": 33.0,       # XY 最大速度，单位 cm/s
-        "max_angular_velocity": 30.0,      # 最大偏航角速度，单位 deg/s
-        "max_vertical_velocity": 30.0,     # Z 方向最大速度，单位 cm/s
+        "max_linear_velocity": 25.0,       # XY 最大速度，单位 cm/s
+        "max_angular_velocity": 25.0,      # 最大偏航角速度，单位 deg/s
+        "max_vertical_velocity": 25.0,     # Z 方向最大速度，单位 cm/s
 
         # 视觉接管控制：像素误差 -> XY 速度指令
         "visual_kp_x": 0.08,               # 视觉 X 比例增益
