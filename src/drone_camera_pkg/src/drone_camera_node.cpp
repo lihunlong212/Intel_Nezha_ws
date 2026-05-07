@@ -28,9 +28,9 @@ public:
     show_preview_(declare_parameter<bool>("show_preview", true)),
     window_name_(declare_parameter<std::string>("window_name", "drone_camera_preview")),
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
-    black_threshold_(declare_parameter<int>("black_threshold", 80)),
-    min_circle_area_(declare_parameter<double>("min_circle_area", 200.0)),
-    min_circularity_(declare_parameter<double>("min_circularity", 0.65))
+    black_threshold_(declare_parameter<int>("black_threshold", 31)),
+    min_circle_area_(declare_parameter<double>("min_circle_area", 10340.0)),
+    min_circularity_(declare_parameter<double>("min_circularity", 0.45))
   {
     fine_data_pub_ =
       create_publisher<std_msgs::msg::Int32MultiArray>(fine_data_topic_, rclcpp::QoS(10));
@@ -77,28 +77,65 @@ public:
   }
 
 private:
+  struct CircleCandidate
+  {
+    int contour_index{-1};
+    cv::Point2f center{};
+    float radius{0.0F};
+    double area{0.0};
+    double score{0.0};
+  };
+
   void detectBlackCircleAndPublish(cv::Mat & frame)
   {
-    cv::Mat gray;
-    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-    cv::GaussianBlur(gray, gray, cv::Size(5, 5), 0.0);
+    cv::Mat hsv;
+    cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
+
+    std::vector<cv::Mat> hsv_channels;
+    cv::split(hsv, hsv_channels);
+
+    cv::Mat value = hsv_channels[2];
+    cv::GaussianBlur(value, value, cv::Size(5, 5), 0.0);
 
     cv::Mat mask;
-    const int threshold = std::max(0, std::min(black_threshold_, 255));
-    cv::threshold(gray, mask, threshold, 255, cv::THRESH_BINARY_INV);
+    cv::Mat otsu_mask;
+    const int fixed_threshold = std::max(0, std::min(black_threshold_, 255));
+    const double otsu_threshold =
+      cv::threshold(value, otsu_mask, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+    const int adaptive_threshold = kUseOtsu ?
+      std::max(fixed_threshold, std::min(160, static_cast<int>(std::lround(otsu_threshold)))) :
+      fixed_threshold;
+    cv::threshold(value, mask, adaptive_threshold, 255, cv::THRESH_BINARY_INV);
 
-    const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
+    const cv::Mat close_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
+    const cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, close_kernel);
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, open_kernel);
 
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
 
-    int best_index = -1;
-    double best_area = 0.0;
+    CircleCandidate best;
+    const double min_area = std::max(20.0, min_circle_area_);
+    const double min_circularity = std::max(0.20, std::min(min_circularity_, 1.0));
+    const double max_aspect_ratio = std::max(1.0, kMaxAspectRatio);
+    const double min_fill_ratio = std::max(0.05, std::min(kMinFillRatio, 1.0));
+    const double max_radial_error = std::max(0.01, kMaxRadialError);
     for (std::size_t i = 0; i < contours.size(); ++i) {
       const double area = std::abs(cv::contourArea(contours[i]));
-      if (area < min_circle_area_) {
+      if (area < min_area) {
+        continue;
+      }
+
+      const cv::Rect bounds = cv::boundingRect(contours[i]);
+      if (bounds.width < 8 || bounds.height < 8) {
+        continue;
+      }
+
+      const double aspect_ratio =
+        static_cast<double>(std::max(bounds.width, bounds.height)) /
+        static_cast<double>(std::max(1, std::min(bounds.width, bounds.height)));
+      if (aspect_ratio > max_aspect_ratio) {
         continue;
       }
 
@@ -108,17 +145,66 @@ private:
       }
 
       const double circularity = 4.0 * CV_PI * area / (perimeter * perimeter);
-      if (circularity >= min_circularity_ && area > best_area) {
-        best_area = area;
-        best_index = static_cast<int>(i);
+      std::vector<cv::Point> approx;
+      cv::approxPolyDP(contours[i], approx, 0.02 * perimeter, true);
+      if (static_cast<int>(approx.size()) < std::max(4, kMinVertices)) {
+        continue;
+      }
+
+      cv::Point2f center;
+      float radius = 0.0F;
+      cv::minEnclosingCircle(contours[i], center, radius);
+      if (radius <= 0.0F) {
+        continue;
+      }
+
+      const double circle_area = CV_PI * static_cast<double>(radius) * static_cast<double>(radius);
+      const double fill_ratio = area / circle_area;
+      if (fill_ratio < min_fill_ratio || fill_ratio > 1.15) {
+        continue;
+      }
+
+      if (circularity < min_circularity && fill_ratio < 0.58) {
+        continue;
+      }
+
+      double radial_error_sum = 0.0;
+      for (const auto & point : contours[i]) {
+        const double dx = static_cast<double>(point.x) - center.x;
+        const double dy = static_cast<double>(point.y) - center.y;
+        const double distance = std::sqrt(dx * dx + dy * dy);
+        radial_error_sum += std::abs(distance - radius) / radius;
+      }
+
+      const double radial_error = radial_error_sum / static_cast<double>(contours[i].size());
+      if (radial_error > max_radial_error) {
+        continue;
+      }
+
+      const double aspect_score = 1.0 / aspect_ratio;
+      const double fill_score = 1.0 - std::min(1.0, std::abs(0.85 - fill_ratio));
+      const double radial_score = 1.0 - std::min(1.0, radial_error / max_radial_error);
+      const double shape_score =
+        0.35 * circularity + 0.25 * fill_score + 0.20 * aspect_score + 0.20 * radial_score;
+      const double score = area * shape_score;
+      if (score > best.score) {
+        best.contour_index = static_cast<int>(i);
+        best.center = center;
+        best.radius = radius;
+        best.area = area;
+        best.score = score;
       }
     }
 
-    if (best_index < 0) {
+    if (best.contour_index < 0) {
+      RCLCPP_DEBUG_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "No black circle found. threshold=%d contours=%zu",
+        adaptive_threshold, contours.size());
       return;
     }
 
-    const cv::Moments moments = cv::moments(contours[static_cast<std::size_t>(best_index)]);
+    const cv::Moments moments = cv::moments(contours[static_cast<std::size_t>(best.contour_index)]);
     if (std::abs(moments.m00) <= std::numeric_limits<double>::epsilon()) {
       return;
     }
@@ -135,7 +221,15 @@ private:
     fine_data_msg.data = {x_offset, y_offset};
     fine_data_pub_->publish(fine_data_msg);
 
-    cv::drawContours(frame, contours, best_index, cv::Scalar(0, 255, 0), 2);
+    cv::drawContours(frame, contours, best.contour_index, cv::Scalar(0, 255, 0), 2);
+    cv::circle(
+      frame,
+      cv::Point(
+        static_cast<int>(std::lround(best.center.x)),
+        static_cast<int>(std::lround(best.center.y))),
+      static_cast<int>(std::lround(best.radius)),
+      cv::Scalar(255, 0, 0),
+      2);
     cv::circle(
       frame,
       cv::Point(
@@ -185,6 +279,12 @@ private:
   cv::VideoCapture camera_;
   rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_pub_;
   rclcpp::TimerBase::SharedPtr frame_timer_;
+
+  static constexpr double kMaxAspectRatio = 1.30;
+  static constexpr double kMinFillRatio = 0.70;
+  static constexpr int kMinVertices = 8;
+  static constexpr double kMaxRadialError = 0.12;
+  static constexpr bool kUseOtsu = true;
 };
 
 int main(int argc, char * argv[])

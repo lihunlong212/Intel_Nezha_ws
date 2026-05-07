@@ -12,9 +12,9 @@ FPS = "15.0"
 SHOW_PREVIEW = "true"
 WINDOW_NAME = "drone_camera_preview"
 FINE_DATA_TOPIC = "/fine_data"
-BLACK_THRESHOLD = "80"
-MIN_CIRCLE_AREA = "200.0"
-MIN_CIRCULARITY = "0.65"
+BLACK_THRESHOLD = "31"
+MIN_CIRCLE_AREA = "10340.0"
+MIN_CIRCULARITY = "0.45"
 
 
 def generate_launch_description():
