@@ -226,6 +226,10 @@ void RouteTargetPublisherNode::heightCallback(const std_msgs::msg::Int16::Shared
 {
   current_height_cm_ = static_cast<double>(msg->data);
   has_height_ = true;
+  RCLCPP_INFO_THROTTLE(
+    get_logger(), *get_clock(), 1000,
+    "Route monitor received /height: %.1fcm",
+    current_height_cm_);
 }
 
 void RouteTargetPublisherNode::fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg)
@@ -308,8 +312,14 @@ bool RouteTargetPublisherNode::hasFreshFineData(const rclcpp::Time & now_time) c
 
 void RouteTargetPublisherNode::advanceToNextTarget()
 {
+  const std::size_t previous_idx = current_idx_;
   ++current_idx_;
   if (current_idx_ < targets_.size()) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Advance target: %zu -> %zu",
+      previous_idx,
+      current_idx_);
     publishCurrent();
   } else {
     current_idx_ = targets_.size();
@@ -419,12 +429,22 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
   switch (phase_) {
     case TaskPhase::Idle: {
+      const double dx_now = target.x_cm - x_cm;
+      const double dy_now = target.y_cm - y_cm;
+      const double dxy_now = std::hypot(dx_now, dy_now);
+      const double dz_now = target.z_cm - z_cm;
+      const bool reached = isReached(target, x_cm, y_cm, z_cm, yaw_deg);
       RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 5000,
-        "Cruising target %zu: x=%.1f y=%.1f z=%.1f yaw=%.1f type=%d",
-        current_idx_, target.x_cm, target.y_cm, target.z_cm, target.yaw_deg, target.type);
+        get_logger(), *get_clock(), 1000,
+        "Idle target %zu type=%d: tgt=(%.1f,%.1f,%.1f) cur=(%.1f,%.1f,%.1f) dxy=%.1f dz=%.1f tol_xy=%.1f tol_z=%.1f has_height=%s reached=%s",
+        current_idx_, target.type,
+        target.x_cm, target.y_cm, target.z_cm,
+        x_cm, y_cm, z_cm,
+        dxy_now, dz_now, pos_tol_cm_, height_tol_cm_,
+        has_height_ ? "true" : "false",
+        reached ? "YES" : "no");
 
-      if (!isReached(target, x_cm, y_cm, z_cm, yaw_deg)) {
+      if (!reached) {
         return;
       }
 
