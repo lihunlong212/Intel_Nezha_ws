@@ -18,13 +18,12 @@ source install/setup.bash
 
 - `bluesea2` publishes `/scan`
 - `activity_control_pkg` publishes `/target_position` and `/active_controller`
-- `drone_camera_pkg` publishes `/fine_data` and `/apriltag_code`
+- `drone_camera_pkg` publishes `/fine_data`
 - An external ROS 2 node publishes `/route_choice` to select which waypoint group should run
 - `activity_control_pkg` enters visual takeover for selected waypoints, republishes the target with a configured visual-alignment height, and publishes `/visual_takeover_active`
 - `pid_control_pkg` subscribes to `/target_position`, `/height`, `/visual_takeover_active`, and `/fine_data`, then publishes `/target_velocity`
-- `activity_control_pkg` publishes `/visual_aligned_apriltag_code` after visual alignment succeeds
+- `activity_control_pkg` advances pickup/drop phases after visual alignment succeeds
 - `uart_to_stm32` listens to `/route_choice` and forwards `/target_velocity` to the flight controller only while the selected route task is active
-- `uart_to_stm32` sends `/visual_aligned_apriltag_code` as serial frame `0x11`
 - `activity_control_pkg` publishes `/mission_complete` after all targets complete
 - `uart_to_stm32` sends `/mission_complete` as serial frame `0x66` with payload `0x06`
 - `uart_to_stm32` also publishes `/height`, `/is_st_ready`, and `/mission_step`
@@ -47,7 +46,7 @@ Visual takeover behavior:
 - XY alignment still comes from `/fine_data`
 - Z is switched to the configurable `visual_takeover_target_height_cm`
 - `height_tolerance_cm` is shared by normal waypoint reach checks and visual-alignment height checks
-- `/visual_aligned_apriltag_code` is published only after XY stays aligned for the required frames and height is also within tolerance
+- Pickup/drop phases continue only after XY stays aligned for the required frames and height is also within tolerance
 
 Key files:
 
@@ -59,15 +58,13 @@ Key files:
 Visual takeover topics:
 
 - `/visual_takeover_active`
-- `/visual_aligned_apriltag_code`
 - `/mission_complete`
 
 ### `drone_camera_pkg`
 
-Runs camera preview and AprilTag detection only, then publishes:
+Runs camera preview and black-circle detection, then publishes:
 
 - `/fine_data`: pixel error `[x_px, y_px]`
-- `/apriltag_code`: current tag code
 
 ### `my_carto_pkg`
 
@@ -76,6 +73,12 @@ Launches lidar, URDF, Cartographer, and RViz together.
 Key file:
 
 - `my_carto_pkg/launch/fly_carto.launch.py`
+
+### `robot_action_demo`
+
+Provides the `dispatch_order` action server. When a task is accepted, it reads
+`robot_action_demo/config/task_launch_map.yaml` and starts the configured launch command.
+The default task mapping starts `my_launch demo1.launch.py`.
 
 ### `my_launch`
 
@@ -125,7 +128,7 @@ Current serial frame usage:
 
 - `0x31`: target velocity
 - `0x32`: velocity/pose related data
-- `0x11`: aligned AprilTag code, payload length `1`, sent `3` times
+- `0x11`: servo control, payload length `1`
 - `0x66`: mission complete, payload `0x06`, sent `3` times
 
 ## Common Launch Commands
@@ -134,4 +137,5 @@ Current serial frame usage:
 ros2 launch pid_control_pkg position_pid_controller.launch.py
 ros2 launch uart_to_stm32 uart_to_stm32.launch.py
 ros2 launch my_launch demo1.launch.py
+ros2 run robot_action_demo dispatch_server
 ```

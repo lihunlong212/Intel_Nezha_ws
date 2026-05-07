@@ -31,7 +31,7 @@ const char * phaseToString(TaskPhase phase)
     case TaskPhase::PickupAscending: return "PickupAscending";
     case TaskPhase::PickupObserving: return "PickupObserving";
     case TaskPhase::DropArriving: return "DropArriving";
-    case TaskPhase::DropServoSent: return "DropServoSent";
+    case TaskPhase::DropActing: return "DropActing";
   }
   return "?";
 }
@@ -51,18 +51,19 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pickup_hold_at_grab_sec_(0.0),
   pickup_observe_sec_(0.0),
   pickup_max_attempts_(0),
-  drop_altitude_cm_(0.0),
-  drop_servo_to_magnet_sec_(0.0),
   circle_lost_window_sec_(0.0),
+  drop_altitude_cm_(0.0),
+  drop_servo_down_duration_sec_(0.0),
+  drop_magnet_off_delay_sec_(0.0),
   visual_takeover_active_(false),
   has_fine_data_(false),
   fine_error_x_px_(0),
   fine_error_y_px_(0),
-  has_circle_center_(false),
   mission_complete_sent_(false),
   aligned_frame_count_(0),
   phase_(TaskPhase::Idle),
-  pickup_attempts_(0)
+  pickup_attempts_(0),
+  magnet_sent_in_phase_(false)
 {
   pos_tol_cm_ = declare_parameter("position_tolerance_cm", 9.0);
   yaw_tol_deg_ = declare_parameter("yaw_tolerance_deg", 5.0);
@@ -73,18 +74,20 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
 
   visual_align_pixel_threshold_ = declare_parameter("visual_align_pixel_threshold", 100.0);
   visual_align_required_frames_ = declare_parameter("visual_align_required_frames", 3);
-  visual_takeover_timeout_sec_ = declare_parameter("visual_takeover_timeout_sec", 5.0);
+  visual_takeover_timeout_sec_ = declare_parameter("visual_takeover_timeout_sec", 15.0);
   fine_data_stale_timeout_sec_ = declare_parameter("fine_data_stale_timeout_sec", 0.5);
 
-  // 抓取/投放任务参数
+  // 抓取参数
   pickup_align_altitude_cm_ = declare_parameter("pickup_align_altitude_cm", 50.0);
   pickup_grab_altitude_cm_ = declare_parameter("pickup_grab_altitude_cm", 20.0);
   pickup_hold_at_grab_sec_ = declare_parameter("pickup_hold_at_grab_sec", 1.0);
   pickup_observe_sec_ = declare_parameter("pickup_observe_sec", 1.0);
   pickup_max_attempts_ = declare_parameter("pickup_max_attempts", 3);
-  drop_altitude_cm_ = declare_parameter("drop_altitude_cm", 50.0);
-  drop_servo_to_magnet_sec_ = declare_parameter("drop_servo_to_magnet_sec", 1.0);
   circle_lost_window_sec_ = declare_parameter("circle_lost_window_sec", 1.0);
+  // 投放参数（独立）
+  drop_altitude_cm_ = declare_parameter("drop_altitude_cm", 50.0);
+  drop_servo_down_duration_sec_ = declare_parameter("drop_servo_down_duration_sec", 2.0);
+  drop_magnet_off_delay_sec_ = declare_parameter("drop_magnet_off_delay_sec", 1.0);
 
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -109,10 +112,6 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     "/fine_data",
     rclcpp::QoS(10),
     std::bind(&RouteTargetPublisherNode::fineDataCallback, this, std::placeholders::_1));
-  circle_center_sub_ = create_subscription<geometry_msgs::msg::PointStamped>(
-    "/circle_center",
-    rclcpp::QoS(10),
-    std::bind(&RouteTargetPublisherNode::circleCenterCallback, this, std::placeholders::_1));
 
   monitor_timer_ = create_wall_timer(
     std::chrono::duration<double>(kDefaultTimerPeriodSec),
@@ -123,35 +122,25 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   RCLCPP_INFO(
     get_logger(),
     "RouteTargetPublisher initialized: map=%s laser_link=%s topic=%s",
-    map_frame_.c_str(),
-    laser_link_frame_.c_str(),
-    output_topic_.c_str());
+    map_frame_.c_str(), laser_link_frame_.c_str(), output_topic_.c_str());
   RCLCPP_INFO(
     get_logger(),
     "Tolerances: position=%.1fcm yaw=%.1fdeg height=%.1fcm",
-    pos_tol_cm_,
-    yaw_tol_deg_,
-    height_tol_cm_);
+    pos_tol_cm_, yaw_tol_deg_, height_tol_cm_);
   RCLCPP_INFO(
     get_logger(),
     "Visual align: threshold=%.1fpx frames=%d timeout=%.1fs stale=%.1fs",
-    visual_align_pixel_threshold_,
-    visual_align_required_frames_,
-    visual_takeover_timeout_sec_,
-    fine_data_stale_timeout_sec_);
+    visual_align_pixel_threshold_, visual_align_required_frames_,
+    visual_takeover_timeout_sec_, fine_data_stale_timeout_sec_);
   RCLCPP_INFO(
     get_logger(),
     "Pickup: align_z=%.1fcm grab_z=%.1fcm hold=%.1fs observe=%.1fs max_attempts=%d",
-    pickup_align_altitude_cm_,
-    pickup_grab_altitude_cm_,
-    pickup_hold_at_grab_sec_,
-    pickup_observe_sec_,
-    pickup_max_attempts_);
+    pickup_align_altitude_cm_, pickup_grab_altitude_cm_,
+    pickup_hold_at_grab_sec_, pickup_observe_sec_, pickup_max_attempts_);
   RCLCPP_INFO(
     get_logger(),
-    "Drop: z=%.1fcm servo_to_magnet=%.1fs",
-    drop_altitude_cm_,
-    drop_servo_to_magnet_sec_);
+    "Drop: z=%.1fcm servo_down=%.1fs magnet_off_delay=%.1fs",
+    drop_altitude_cm_, drop_servo_down_duration_sec_, drop_magnet_off_delay_sec_);
 }
 
 void RouteTargetPublisherNode::addTarget(const Target & target)
@@ -204,11 +193,7 @@ void RouteTargetPublisherNode::publishTarget(const Target & target, bool init_fl
   RCLCPP_INFO(
     get_logger(),
     "Published target: x=%.1fcm y=%.1fcm z=%.1fcm yaw=%.1fdeg type=%d%s",
-    target.x_cm,
-    target.y_cm,
-    target.z_cm,
-    target.yaw_deg,
-    target.type,
+    target.x_cm, target.y_cm, target.z_cm, target.yaw_deg, target.type,
     init_flag ? " (first)" : "");
 }
 
@@ -226,7 +211,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = pickup_grab_altitude_cm_;
       break;
     case TaskPhase::DropArriving:
-    case TaskPhase::DropServoSent:
+    case TaskPhase::DropActing:
       published_target.z_cm = drop_altitude_cm_;
       break;
     case TaskPhase::Idle:
@@ -256,17 +241,6 @@ void RouteTargetPublisherNode::fineDataCallback(const std_msgs::msg::Int32MultiA
   last_fine_data_time_ = now();
 }
 
-void RouteTargetPublisherNode::circleCenterCallback(
-  const geometry_msgs::msg::PointStamped::SharedPtr msg)
-{
-  // circle_detector 仅在检测到有效圆时发布；NaN 表示相机失败
-  if (std::isnan(msg->point.x) || std::isnan(msg->point.y)) {
-    return;
-  }
-  has_circle_center_ = true;
-  last_circle_center_time_ = now();
-}
-
 bool RouteTargetPublisherNode::getCurrentPose(
   double & x_cm,
   double & y_cm,
@@ -290,13 +264,9 @@ bool RouteTargetPublisherNode::getCurrentPose(
     return true;
   } catch (const tf2::TransformException & ex) {
     RCLCPP_WARN_THROTTLE(
-      get_logger(),
-      *get_clock(),
-      2000,
+      get_logger(), *get_clock(), 2000,
       "TF lookup failed (%s -> %s): %s",
-      map_frame_.c_str(),
-      laser_link_frame_.c_str(),
-      ex.what());
+      map_frame_.c_str(), laser_link_frame_.c_str(), ex.what());
     return false;
   }
 }
@@ -384,16 +354,27 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   }
   phase_ = phase;
   phase_start_time_ = now_time;
+  magnet_sent_in_phase_ = false;
 
-  // 视觉接管开关：仅在 PickupAligning 阶段开启视觉 PID
-  const bool takeover = (phase == TaskPhase::PickupAligning);
+  // 视觉接管：抓取流程的全部 5 个阶段都开启。
+  // 舵机下放期间 /fine_data 过期 → PID 让 XY 速度归零，无人机原地保持视觉对准过的位置。
+  // 上升回 50cm 后摄像头解除遮挡，若仍有黑圆，PID 会把无人机拉回黑圆上方。
+  // 投放阶段不开启视觉接管，使用位置 PID 直接飞到 (x,y,50)。
+  const bool takeover =
+    phase == TaskPhase::PickupAligning ||
+    phase == TaskPhase::PickupDescending ||
+    phase == TaskPhase::PickupHolding ||
+    phase == TaskPhase::PickupAscending ||
+    phase == TaskPhase::PickupObserving;
   if (visual_takeover_active_ != takeover) {
     visual_takeover_active_ = takeover;
     publishVisualTakeoverState(takeover);
-    if (takeover) {
-      aligned_frame_count_ = 0;
-      visual_takeover_start_time_ = now_time;
-    }
+  }
+
+  // 进入 PickupAligning 时重置帧计数 + 视觉超时起点（重试场景必须重置）
+  if (phase == TaskPhase::PickupAligning) {
+    aligned_frame_count_ = 0;
+    visual_takeover_start_time_ = now_time;
   }
 
   // 下发新阶段对应的目标位置（z 由 getPublishedTarget 调整）
@@ -471,7 +452,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (phase_elapsed > visual_takeover_timeout_sec_) {
         RCLCPP_WARN(
           get_logger(),
-          "Pickup alignment timed out for target %zu after %.1fs (attempt %d/%d). Skipping waypoint.",
+          "Pickup alignment timed out for target %zu after %.1fs (attempt %d/%d). Giving up.",
           current_idx_, phase_elapsed, pickup_attempts_ + 1, pickup_max_attempts_);
         publishElectromagnetControl(0x00);
         publishServoControl(0x00);
@@ -507,8 +488,9 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (xy_ok && height_ok) {
         ++aligned_frame_count_;
         if (aligned_frame_count_ >= visual_align_required_frames_) {
-          publishServoControl(0x01);
+          // 对准成功：电磁铁通电（仅此一次，整个抓取期间保持通电），舵机下放，开始下降到 20cm
           publishElectromagnetControl(0x01);
+          publishServoControl(0x01);
           setPhase(TaskPhase::PickupDescending, now_time);
         }
       } else {
@@ -532,11 +514,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     case TaskPhase::PickupHolding: {
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 500,
-        "PickupHolding %zu: elapsed=%.2fs / %.2fs",
+        "PickupHolding %zu: elapsed=%.2fs / %.2fs (magnet ON, grabbing)",
         current_idx_, phase_elapsed, pickup_hold_at_grab_sec_);
       if (phase_elapsed >= pickup_hold_at_grab_sec_) {
+        // 抓住后舵机收起开始上升；电磁铁保持通电不变
         publishServoControl(0x00);
-        // 电磁铁保持 0x01 吸住货物
         setPhase(TaskPhase::PickupAscending, now_time);
       }
       return;
@@ -546,11 +528,9 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       const double height_error_cm = pickup_align_altitude_cm_ - z_cm;
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 500,
-        "PickupAscending %zu: z=%.1fcm target=%.1fcm err=%.1fcm",
+        "PickupAscending %zu: z=%.1fcm target=%.1fcm err=%.1fcm (magnet still ON)",
         current_idx_, z_cm, pickup_align_altitude_cm_, height_error_cm);
       if (std::fabs(height_error_cm) <= height_tol_cm_) {
-        // 进入观察窗口前重置圆心新鲜度（忽略上升前残留的检测结果）
-        has_circle_center_ = false;
         setPhase(TaskPhase::PickupObserving, now_time);
       }
       return;
@@ -559,16 +539,18 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     case TaskPhase::PickupObserving: {
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 500,
-        "PickupObserving %zu: elapsed=%.2fs / %.2fs has_circle=%s",
-        current_idx_, phase_elapsed, pickup_observe_sec_,
-        has_circle_center_ ? "true" : "false");
+        "PickupObserving %zu: elapsed=%.2fs / %.2fs",
+        current_idx_, phase_elapsed, pickup_observe_sec_);
       if (phase_elapsed < pickup_observe_sec_) {
         return;
       }
 
+      // 成败判定：观察期内是否还能在 /fine_data 上看到黑圆
+      // 抓取成功 → 黑圆被吸走 → /fine_data 过期 → circle_seen=false
+      // 抓取失败 → 黑圆还在地上 → /fine_data 持续刷新 → circle_seen=true
       const bool circle_seen =
-        has_circle_center_ &&
-        (now_time - last_circle_center_time_).seconds() <= circle_lost_window_sec_;
+        hasFreshFineData(now_time) &&
+        (now_time - last_fine_data_time_).seconds() <= circle_lost_window_sec_;
 
       if (!circle_seen) {
         RCLCPP_INFO(
@@ -593,8 +575,9 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       } else {
         RCLCPP_WARN(
           get_logger(),
-          "Pickup retry at target %zu (attempt %d/%d).",
+          "Pickup retry at target %zu (attempt %d/%d). Magnet stays ON.",
           current_idx_, pickup_attempts_ + 1, pickup_max_attempts_);
+        // 重试：电磁铁保持通电（用户要求一次 0x01 持续到任务结束），重新对准抓取
         setPhase(TaskPhase::PickupAligning, now_time);
       }
       return;
@@ -609,22 +592,34 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       Target drop_target = target;
       drop_target.z_cm = drop_altitude_cm_;
       if (isReached(drop_target, x_cm, y_cm, z_cm, yaw_deg)) {
-        publishServoControl(0x00);
-        setPhase(TaskPhase::DropServoSent, now_time);
+        publishServoControl(0x01);
+        setPhase(TaskPhase::DropActing, now_time);
       }
       return;
     }
 
-    case TaskPhase::DropServoSent: {
+    case TaskPhase::DropActing: {
+      // 时序：t=0 已发 servo=01；t=drop_magnet_off_delay 发 magnet=00；t=drop_servo_down_duration 发 servo=00 → 离开
+      if (!magnet_sent_in_phase_ && phase_elapsed >= drop_magnet_off_delay_sec_) {
+        publishElectromagnetControl(0x00);
+        magnet_sent_in_phase_ = true;
+        RCLCPP_INFO(get_logger(), "DropActing: magnet OFF at t=%.2fs", phase_elapsed);
+      }
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 500,
-        "DropServoSent %zu: elapsed=%.2fs / %.2fs",
-        current_idx_, phase_elapsed, drop_servo_to_magnet_sec_);
-      if (phase_elapsed >= drop_servo_to_magnet_sec_) {
-        publishElectromagnetControl(0x00);
-        RCLCPP_INFO(
-          get_logger(),
-          "Drop completed at target %zu. Advancing.", current_idx_);
+        "DropActing %zu: elapsed=%.2fs / %.2fs (magnet_sent=%s)",
+        current_idx_, phase_elapsed, drop_servo_down_duration_sec_,
+        magnet_sent_in_phase_ ? "true" : "false");
+
+      if (phase_elapsed >= drop_servo_down_duration_sec_) {
+        if (!magnet_sent_in_phase_) {
+          publishElectromagnetControl(0x00);
+          magnet_sent_in_phase_ = true;
+          RCLCPP_WARN(get_logger(),
+            "DropActing: magnet_delay >= servo_down_duration, forcing magnet OFF now");
+        }
+        publishServoControl(0x00);
+        RCLCPP_INFO(get_logger(), "Drop completed at target %zu. Advancing.", current_idx_);
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
       }
@@ -690,13 +685,8 @@ void RouteTestNode::loadRoute(const std::vector<Target> & route)
     RCLCPP_INFO(
       get_logger(),
       "Loaded target %zu/%zu: x=%.1f y=%.1f z=%.1f yaw=%.1f type=%d",
-      index + 1,
-      route.size(),
-      target.x_cm,
-      target.y_cm,
-      target.z_cm,
-      target.yaw_deg,
-      target.type);
+      index + 1, route.size(),
+      target.x_cm, target.y_cm, target.z_cm, target.yaw_deg, target.type);
   }
 
   const auto current = route_node_->currentIndex();

@@ -8,7 +8,6 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
-#include <geometry_msgs/msg/point_stamped.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
@@ -36,13 +35,13 @@ struct Target
 enum class TaskPhase
 {
   Idle,              // 普通巡航 / 任务航点未开始
-  PickupAligning,    // 抓取航点：50cm 视觉对准
-  PickupDescending,  // 抓取航点：已发 servo=01 + magnet=01，下降到 20cm
-  PickupHolding,     // 抓取航点：在 20cm 悬停 1s
-  PickupAscending,   // 抓取航点：已发 servo=00，上升到 50cm
-  PickupObserving,   // 抓取航点：在 50cm 观察是否还能看到圆 1s
-  DropArriving,      // 投放航点：飞到 (x,y,50cm)
-  DropServoSent      // 投放航点：已发 servo=00，等待 1s 后发 magnet=00
+  PickupAligning,    // 抓取：在 50cm 视觉对准（高度 + XY）
+  PickupDescending,  // 抓取：magnet=01 + servo=01 已发，下降到 20cm（电磁铁全程通电）
+  PickupHolding,     // 抓取：在 20cm 悬停一段时间，让磁铁吸住货物
+  PickupAscending,   // 抓取：servo=00 已发，上升回 50cm（电磁铁仍通电吸住货物）
+  PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑圆来判定成败
+  DropArriving,      // 投放：飞到 (x,y,50cm)
+  DropActing         // 投放：servo=01 已发，2s 内发 magnet=00 释放，结束发 servo=00
 };
 
 class RouteTargetPublisherNode : public rclcpp::Node
@@ -66,7 +65,6 @@ private:
   void monitorTimerCallback();
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
-  void circleCenterCallback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
   void advanceToNextTarget();
   void publishVisualTakeoverState(bool active);
   void publishServoControl(uint8_t state);
@@ -85,7 +83,6 @@ private:
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr mission_complete_pub_;
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr circle_center_sub_;
   rclcpp::TimerBase::SharedPtr monitor_timer_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -112,15 +109,18 @@ private:
   double visual_takeover_timeout_sec_;
   double fine_data_stale_timeout_sec_;
 
-  // 抓取/投放任务参数
-  double pickup_align_altitude_cm_;
-  double pickup_grab_altitude_cm_;
-  double pickup_hold_at_grab_sec_;
-  double pickup_observe_sec_;
-  int pickup_max_attempts_;
-  double drop_altitude_cm_;
-  double drop_servo_to_magnet_sec_;
-  double circle_lost_window_sec_;
+  // 抓取参数
+  double pickup_align_altitude_cm_;        // 抓取对准高度（默认 50cm）
+  double pickup_grab_altitude_cm_;         // 抓取下探高度（默认 20cm）
+  double pickup_hold_at_grab_sec_;         // 在 20cm 悬停吸附的时间（默认 1.0s）
+  double pickup_observe_sec_;              // 上升回 50cm 后观察的窗口（默认 1.0s）
+  int pickup_max_attempts_;                // 抓取最大重试次数（默认 3）
+  double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑圆消失"（默认 1.0s）
+
+  // 投放参数（独立时序，不受抓取参数影响）
+  double drop_altitude_cm_;                // 投放高度（默认 50cm）
+  double drop_servo_down_duration_sec_;    // 投放时舵机下放总时长（默认 2.0s）
+  double drop_magnet_off_delay_sec_;       // 投放时舵机下放后多久断开电磁铁（默认 1.0s）
 
   // 视觉接管 / fine_data 状态
   bool visual_takeover_active_;
@@ -128,10 +128,6 @@ private:
   int fine_error_x_px_;
   int fine_error_y_px_;
   rclcpp::Time last_fine_data_time_;
-
-  // 圆心检测的新鲜度（用于抓取成功判定）
-  bool has_circle_center_;
-  rclcpp::Time last_circle_center_time_;
 
   bool mission_complete_sent_;
 
@@ -142,6 +138,7 @@ private:
   TaskPhase phase_;
   rclcpp::Time phase_start_time_;
   int pickup_attempts_;
+  bool magnet_sent_in_phase_;              // 当前 *Acting 阶段是否已经发过电磁铁帧
 };
 
 class RouteTestNode : public rclcpp::Node

@@ -25,7 +25,7 @@ public:
     frame_width_(declare_parameter<int>("frame_width", 640)),
     frame_height_(declare_parameter<int>("frame_height", 480)),
     fps_(declare_parameter<double>("fps", 15.0)),
-    show_preview_(declare_parameter<bool>("show_preview", true)),
+    show_preview_(declare_parameter<bool>("show_preview", false)),
     window_name_(declare_parameter<std::string>("window_name", "drone_camera_preview")),
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
     black_threshold_(declare_parameter<int>("black_threshold", 31)),

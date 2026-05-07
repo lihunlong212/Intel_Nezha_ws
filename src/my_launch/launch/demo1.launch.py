@@ -1,71 +1,110 @@
 import os
+
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction, RegisterEventHandler, EmitEvent
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
-from launch_ros.actions import Node, LifecycleNode
-from launch.events import matches_action
-from launch_ros.events.lifecycle import ChangeState
-from lifecycle_msgs.msg import Transition
-from launch.event_handlers import OnProcessStart
-from launch_ros.event_handlers import OnStateTransition
 
-def generate_launch_description():
-    # 1. 获取包路径
-    my_carto_pkg_share = FindPackageShare(package='my_carto_pkg').find('my_carto_pkg')
-    uart_to_stm32_pkg_share = FindPackageShare(package='uart_to_stm32').find('uart_to_stm32')
-    pid_control_pkg_share = FindPackageShare(package='pid_control_pkg').find('pid_control_pkg')
-    activity_control_pkg_share = FindPackageShare(package='activity_control_pkg').find('activity_control_pkg')
-    
-    # 2. 定义 Launch 文件包含
+
+def _package_launch(package_name: str, filename: str) -> str:
+    package_share = FindPackageShare(package=package_name).find(package_name)
+    return os.path.join(package_share, "launch", filename)
+
+
+def generate_launch_description() -> LaunchDescription:
+    camera_device = LaunchConfiguration("camera_device")
+    frame_width = LaunchConfiguration("frame_width")
+    frame_height = LaunchConfiguration("frame_height")
+    fps = LaunchConfiguration("fps")
+    show_preview = LaunchConfiguration("show_preview")
+    fine_data_topic = LaunchConfiguration("fine_data_topic")
+    black_threshold = LaunchConfiguration("black_threshold")
+    min_circle_area = LaunchConfiguration("min_circle_area")
+    min_circularity = LaunchConfiguration("min_circularity")
+
     fly_carto_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(my_carto_pkg_share, 'launch', 'fly_carto.launch.py')
-        )       
+        PythonLaunchDescriptionSource(_package_launch("my_carto_pkg", "fly_carto.launch.py"))
     )
-
-    
     uart_to_stm32_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(uart_to_stm32_pkg_share, 'launch', 'uart_to_stm32.launch.py')
-        )
+        PythonLaunchDescriptionSource(_package_launch("uart_to_stm32", "uart_to_stm32.launch.py"))
     )
-    
     position_pid_controller_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(pid_control_pkg_share, 'launch', 'position_pid_controller.launch.py')
-        )
-    )   
-
-    route_test_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(activity_control_pkg_share, 'launch', 'route_test.launch.py')
+            _package_launch("pid_control_pkg", "position_pid_controller.launch.py")
         )
     )
+    route_test_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(_package_launch("activity_control_pkg", "route_test.launch.py"))
+    )
+    camera_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            _package_launch("drone_camera_pkg", "black_circle_camera.launch.py")
+        ),
+        launch_arguments={
+            "camera_device": camera_device,
+            "frame_width": frame_width,
+            "frame_height": frame_height,
+            "fps": fps,
+            "show_preview": show_preview,
+            "fine_data_topic": fine_data_topic,
+            "black_threshold": black_threshold,
+            "min_circle_area": min_circle_area,
+            "min_circularity": min_circularity,
+        }.items(),
+    )
 
-    drone_camera_node = Node(
-        package='drone_camera_pkg',
-        executable='drone_camera_node',
-        name='drone_camera_node',
-        output='screen',
-        parameters=[
-            {
-                'camera_device': '/dev/video0',
-                'frame_width': 640,
-                'frame_height': 480,
-                'fps': 15.0,
-                'window_name': 'drone_camera_preview',
-            }
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                "camera_device",
+                default_value="/dev/video0",
+                description="Camera device path used by the vision node.",
+            ),
+            DeclareLaunchArgument(
+                "frame_width",
+                default_value="640",
+                description="Camera frame width.",
+            ),
+            DeclareLaunchArgument(
+                "frame_height",
+                default_value="480",
+                description="Camera frame height.",
+            ),
+            DeclareLaunchArgument(
+                "fps",
+                default_value="15.0",
+                description="Camera frames per second.",
+            ),
+            DeclareLaunchArgument(
+                "show_preview",
+                default_value="false",
+                description="Show OpenCV preview window for camera debugging.",
+            ),
+            DeclareLaunchArgument(
+                "fine_data_topic",
+                default_value="/fine_data",
+                description="Vision pixel-offset topic consumed by PID and activity control.",
+            ),
+            DeclareLaunchArgument(
+                "black_threshold",
+                default_value="31",
+                description="Gray threshold for black target segmentation.",
+            ),
+            DeclareLaunchArgument(
+                "min_circle_area",
+                default_value="10340.0",
+                description="Minimum contour area for the black circle target.",
+            ),
+            DeclareLaunchArgument(
+                "min_circularity",
+                default_value="0.45",
+                description="Minimum circularity, where 1.0 is a perfect circle.",
+            ),
+            fly_carto_launch,
+            uart_to_stm32_launch,
+            position_pid_controller_launch,
+            route_test_launch,
+            camera_launch,
         ]
     )
-    
-
-    
-
-    return LaunchDescription([
-        fly_carto_launch, # 立即启动
-        uart_to_stm32_launch,
-        position_pid_controller_launch,
-        route_test_launch,
-        drone_camera_node,
-    ])
