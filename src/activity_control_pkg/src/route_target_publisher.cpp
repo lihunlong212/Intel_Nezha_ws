@@ -103,6 +103,12 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     create_publisher<std_msgs::msg::UInt8>("/electromagnet_control", rclcpp::QoS(10).reliable());
   mission_complete_pub_ =
     create_publisher<std_msgs::msg::Empty>("/mission_complete", rclcpp::QoS(10).reliable());
+  pickup_done_pub_ =
+    create_publisher<std_msgs::msg::Empty>("/pickup_done", rclcpp::QoS(10).reliable());
+  pickup_failed_pub_ =
+    create_publisher<std_msgs::msg::Empty>("/pickup_failed", rclcpp::QoS(10).reliable());
+  drop_done_pub_ =
+    create_publisher<std_msgs::msg::Empty>("/drop_done", rclcpp::QoS(10).reliable());
 
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
     "/height",
@@ -577,6 +583,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           get_logger(),
           "Pickup SUCCESS at target %zu (attempt %d/%d). Advancing.",
           current_idx_, pickup_attempts_ + 1, pickup_max_attempts_);
+        // 通知 action server：抓取完成，进入送货阶段
+        if (pickup_done_pub_) {
+          std_msgs::msg::Empty empty_msg;
+          pickup_done_pub_->publish(empty_msg);
+        }
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
         return;
@@ -586,12 +597,20 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (pickup_attempts_ >= pickup_max_attempts_) {
         RCLCPP_WARN(
           get_logger(),
-          "Pickup FAILED after %d attempts at target %zu. Giving up.",
+          "Pickup FAILED after %d attempts at target %zu. Giving up, notifying action server.",
           pickup_attempts_, current_idx_);
         publishElectromagnetControl(0x00);
         publishServoControl(0x00);
+        // 通知 action server：抓取彻底失败，整个任务应判为失败
+        if (pickup_failed_pub_) {
+          std_msgs::msg::Empty empty_msg;
+          pickup_failed_pub_->publish(empty_msg);
+        }
         setPhase(TaskPhase::Idle, now_time);
-        advanceToNextTarget();
+        // 直接跳到任务末尾，让 monitor 进入稳定停止分支；
+        // 同时屏蔽 mission_complete 发送（这是失败终止，不应通知 STM32 关机）
+        current_idx_ = targets_.size();
+        mission_complete_sent_ = true;
       } else {
         RCLCPP_WARN(
           get_logger(),
@@ -640,6 +659,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         }
         publishServoControl(0x00);
         RCLCPP_INFO(get_logger(), "Drop completed at target %zu. Advancing.", current_idx_);
+        // 通知 action server：投递完成，整个任务结束
+        if (drop_done_pub_) {
+          std_msgs::msg::Empty empty_msg;
+          drop_done_pub_->publish(empty_msg);
+        }
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
       }

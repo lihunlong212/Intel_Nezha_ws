@@ -13,8 +13,10 @@ import yaml
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.context import Context
+from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.node import Node
+from std_msgs.msg import Empty
 
 from robot_task_interfaces.action import DispatchOrder
 
@@ -36,6 +38,63 @@ class LaunchTask:
     @property
     def display_command(self) -> str:
         return " ".join(self.command)
+
+
+class _LocalDomainListener:
+    """在指定 DOMAIN（任务子进程的本地 DOMAIN）下监听 /pickup_done 和 /drop_done。
+
+    action server 主体跑在 DOMAIN=10（外部通信），但 demo1.launch 子进程跑在 DOMAIN=0（本地）。
+    用第二个独立的 rclpy Context 订阅本地 DOMAIN 的事件话题。
+    """
+
+    def __init__(self, parent_logger, domain_id: int) -> None:
+        self._logger = parent_logger
+        self.pickup_done = threading.Event()
+        self.pickup_failed = threading.Event()
+        self.drop_done = threading.Event()
+        self._context = Context()
+        self._context.init(domain_id=domain_id)
+        self._node = Node("dispatch_local_listener", context=self._context)
+        self._node.create_subscription(Empty, "/pickup_done", self._on_pickup, 10)
+        self._node.create_subscription(Empty, "/pickup_failed", self._on_pickup_failed, 10)
+        self._node.create_subscription(Empty, "/drop_done", self._on_drop, 10)
+        self._executor = SingleThreadedExecutor(context=self._context)
+        self._executor.add_node(self._node)
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        self._logger.info(f"local-domain listener started on DOMAIN={domain_id}")
+
+    def _spin(self) -> None:
+        try:
+            self._executor.spin()
+        except Exception as exc:  # pragma: no cover
+            self._logger.error(f"local listener spin crashed: {exc}")
+
+    def _on_pickup(self, _msg: Empty) -> None:
+        self._logger.info("received /pickup_done from local domain")
+        self.pickup_done.set()
+
+    def _on_pickup_failed(self, _msg: Empty) -> None:
+        self._logger.warning("received /pickup_failed from local domain (3 attempts exhausted)")
+        self.pickup_failed.set()
+
+    def _on_drop(self, _msg: Empty) -> None:
+        self._logger.info("received /drop_done from local domain")
+        self.drop_done.set()
+
+    def shutdown(self) -> None:
+        try:
+            self._executor.shutdown()
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            self._node.destroy_node()
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            self._context.shutdown()
+        except Exception:  # pragma: no cover
+            pass
 
 
 class DispatchActionServer(Node):
@@ -97,15 +156,23 @@ class DispatchActionServer(Node):
             return self._finish_failed(goal_handle, goal.task_id, "NO_LAUNCH_CONFIG", "no launch task configured")
 
         proc: subprocess.Popen | None = None
-        elapsed = 0
+        listener: _LocalDomainListener | None = None
         try:
+            # 1. 在任务子进程的本地 DOMAIN 起一个独立监听器，订阅 /pickup_done /drop_done
+            try:
+                listener = _LocalDomainListener(self.get_logger(), int(self._target_domain_id))
+            except Exception as exc:
+                return self._finish_failed(
+                    goal_handle, goal.task_id, "LISTENER_INIT_FAILED",
+                    f"failed to init local-domain listener: {exc}",
+                )
+
+            # 2. 启动 demo1.launch 子进程（DOMAIN=本地 ID）
             try:
                 proc = self._start_launch_subprocess(task)
             except OSError as exc:
                 return self._finish_failed(
-                    goal_handle,
-                    goal.task_id,
-                    "LAUNCH_START_FAILED",
+                    goal_handle, goal.task_id, "LAUNCH_START_FAILED",
                     f"failed to start launch command {task.display_command}: {exc}",
                 )
 
@@ -113,25 +180,49 @@ class DispatchActionServer(Node):
                 self._active_process = proc
             self.get_logger().info(f"launch subprocess pid={proc.pid}")
 
+            # 3. 反馈循环：根据 pickup_done/drop_done 事件切换状态
             feedback = DispatchOrder.Feedback()
-            while rclpy.ok():
-                if proc.poll() is not None:
-                    if proc.returncode == 0:
-                        goal_handle.succeed()
-                        result = DispatchOrder.Result()
-                        result.success = True
-                        result.task_id = goal.task_id
-                        result.final_state = "FINISHED"
-                        result.detail = f"launch finished successfully: {task.display_command}"
-                        return result
+            start_time = time.monotonic()
 
+            while rclpy.ok():
+                # 投递完成 → 任务成功结束（用这个判断完成，不等子进程退出）
+                if listener.drop_done.is_set():
+                    elapsed_total = time.monotonic() - start_time
+                    self.get_logger().info(
+                        f"drop_done received, finishing action successfully (elapsed={elapsed_total:.1f}s)"
+                    )
+                    # 任务成功后停掉 launch 子进程
+                    if proc.poll() is None:
+                        self._stop_subprocess(proc)
+                    goal_handle.succeed()
+                    result = DispatchOrder.Result()
+                    result.success = True
+                    result.task_id = goal.task_id
+                    result.final_state = "SUCCEEDED"
+                    result.detail = "arrived"
+                    return result
+
+                # 抓取 3 次失败 → 任务失败结束（只有一个货物，抓不到就直接失败）
+                if listener.pickup_failed.is_set():
+                    elapsed_total = time.monotonic() - start_time
+                    self.get_logger().error(
+                        f"pickup_failed received after {elapsed_total:.1f}s, aborting task as FAILED"
+                    )
+                    if proc.poll() is None:
+                        self._stop_subprocess(proc)
                     return self._finish_failed(
-                        goal_handle,
-                        goal.task_id,
-                        "LAUNCH_EXITED",
-                        f"launch exited unexpectedly with code={proc.returncode}: {task.display_command}",
+                        goal_handle, goal.task_id, "PICKUP_FAILED",
+                        "pickup attempts exhausted (3/3), cargo not grabbed",
                     )
 
+                # 子进程异常退出（在 drop_done 之前退出）→ 失败
+                if proc.poll() is not None:
+                    return self._finish_failed(
+                        goal_handle, goal.task_id, "LAUNCH_EXITED",
+                        f"launch exited (code={proc.returncode}) before drop completed: {task.display_command}",
+                    )
+
+                # 用户取消
                 if goal_handle.is_cancel_requested:
                     self._stop_subprocess(proc)
                     goal_handle.canceled()
@@ -139,31 +230,34 @@ class DispatchActionServer(Node):
                     result.success = False
                     result.task_id = goal.task_id
                     result.final_state = "CANCELED"
-                    result.detail = f"launch canceled after {elapsed}s: {task.display_command}"
+                    result.detail = f"canceled: {task.display_command}"
                     self.get_logger().info(f"goal canceled: {goal.task_id}")
                     return result
 
-                elapsed += 1
+                elapsed = time.monotonic() - start_time
                 feedback.current_state = "RUNNING"
-                feedback.progress = 0.0
-                feedback.detail = (
-                    f"domain {self._target_domain_id}, elapsed {elapsed}s, command: {task.display_command}"
-                )
+                feedback.progress = float(elapsed)
+                if listener.pickup_done.is_set():
+                    feedback.detail = "正在送货"
+                else:
+                    feedback.detail = "正在前往取货点"
                 goal_handle.publish_feedback(feedback)
+
                 self.get_logger().info(
-                    f"launch running in domain {self._target_domain_id} "
-                    f"(elapsed={elapsed}s, task={goal.task_id})"
+                    f"task {goal.task_id} elapsed={elapsed:.1f}s phase={feedback.detail}"
                 )
                 time.sleep(1.0)
         finally:
             if proc is not None and proc.poll() is None:
                 self._stop_subprocess(proc)
+            if listener is not None:
+                listener.shutdown()
             with self._lock:
                 if self._active_process is proc:
                     self._active_process = None
                 self._busy = False
 
-        return self._finish_failed(goal_handle, goal.task_id, "NODE_STOPPED", "rclpy stopped before launch finished")
+        return self._finish_failed(goal_handle, goal.task_id, "NODE_STOPPED", "rclpy stopped before drop completed")
 
     def _load_config(self) -> tuple[str, dict[str, LaunchTask]]:
         config_path = self._get_config_path()

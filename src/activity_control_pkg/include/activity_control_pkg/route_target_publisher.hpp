@@ -81,6 +81,9 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr servo_control_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr electromagnet_control_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr mission_complete_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pickup_done_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pickup_failed_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr drop_done_pub_;
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_sub_;
   rclcpp::TimerBase::SharedPtr monitor_timer_;
