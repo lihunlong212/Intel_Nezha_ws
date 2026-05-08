@@ -142,6 +142,12 @@ private:
   rclcpp::Time phase_start_time_;
   int pickup_attempts_;
   bool magnet_sent_in_phase_;              // 当前 *Acting 阶段是否已经发过电磁铁帧
+
+  // 抓取对准成功时记录的实际位置（用于下降/悬停/上升锁位 + 重试回位）
+  // 因为黑圆实物可能不完全在航点 xy，对准后用真实位置代替航点坐标
+  double aligned_x_cm_;
+  double aligned_y_cm_;
+  bool has_aligned_position_;
 };
 
 class RouteTestNode : public rclcpp::Node

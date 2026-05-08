@@ -63,7 +63,10 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   aligned_frame_count_(0),
   phase_(TaskPhase::Idle),
   pickup_attempts_(0),
-  magnet_sent_in_phase_(false)
+  magnet_sent_in_phase_(false),
+  aligned_x_cm_(0.0),
+  aligned_y_cm_(0.0),
+  has_aligned_position_(false)
 {
   pos_tol_cm_ = declare_parameter("position_tolerance_cm", 9.0);
   yaw_tol_deg_ = declare_parameter("yaw_tolerance_deg", 5.0);
@@ -214,12 +217,29 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
   Target published_target = target;
   switch (phase_) {
     case TaskPhase::PickupAligning:
+      // 第一次对准：用航点 xy；重试时：用上一次对准成功时记录的 xy（更接近实际黑圆位置）
+      if (has_aligned_position_) {
+        published_target.x_cm = aligned_x_cm_;
+        published_target.y_cm = aligned_y_cm_;
+      }
+      published_target.z_cm = pickup_align_altitude_cm_;
+      break;
     case TaskPhase::PickupAscending:
     case TaskPhase::PickupObserving:
+      // 上升 + 观察：xy 锁在对准位置，z=50cm
+      if (has_aligned_position_) {
+        published_target.x_cm = aligned_x_cm_;
+        published_target.y_cm = aligned_y_cm_;
+      }
       published_target.z_cm = pickup_align_altitude_cm_;
       break;
     case TaskPhase::PickupDescending:
     case TaskPhase::PickupHolding:
+      // 下降 + 抓取悬停：xy 锁在对准位置（位置 PID 会让 xy 速度 ~0），z=20cm
+      if (has_aligned_position_) {
+        published_target.x_cm = aligned_x_cm_;
+        published_target.y_cm = aligned_y_cm_;
+      }
       published_target.z_cm = pickup_grab_altitude_cm_;
       break;
     case TaskPhase::DropArriving:
@@ -378,15 +398,12 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   phase_start_time_ = now_time;
   magnet_sent_in_phase_ = false;
 
-  // 视觉接管：抓取流程的全部 5 个阶段都开启。
-  // 舵机下放期间 /fine_data 过期 → PID 让 XY 速度归零，无人机原地保持视觉对准过的位置。
-  // 上升回 50cm 后摄像头解除遮挡，若仍有黑圆，PID 会把无人机拉回黑圆上方。
-  // 投放阶段不开启视觉接管，使用位置 PID 直接飞到 (x,y,50)。
+  // 视觉接管：仅在 PickupAligning（对准黑圆）和 PickupObserving（观察判定）开启。
+  // PickupDescending / PickupHolding / PickupAscending 期间关闭视觉，使用位置 PID
+  // 把 xy 锁在 aligned_x/y（对准成功时记录的真实位置），位置 PID 自然输出 xy 速度 ~0，
+  // 不会因为残余视觉数据 / 视野丢失而漂移。
   const bool takeover =
     phase == TaskPhase::PickupAligning ||
-    phase == TaskPhase::PickupDescending ||
-    phase == TaskPhase::PickupHolding ||
-    phase == TaskPhase::PickupAscending ||
     phase == TaskPhase::PickupObserving;
   if (visual_takeover_active_ != takeover) {
     visual_takeover_active_ = takeover;
@@ -477,6 +494,8 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
       if (target.type == 2) {
         pickup_attempts_ = 0;
+        // 进入新抓取航点：清掉上一个抓取留下的对准位置
+        has_aligned_position_ = false;
         setPhase(TaskPhase::PickupAligning, now_time);
       } else if (target.type == 3) {
         setPhase(TaskPhase::DropArriving, now_time);
@@ -494,6 +513,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           current_idx_, phase_elapsed, pickup_attempts_ + 1, pickup_max_attempts_);
         publishElectromagnetControl(0x00);
         publishServoControl(0x00);
+        has_aligned_position_ = false;  // 超时跳过，清掉锁位
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
         return;
@@ -526,7 +546,16 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (xy_ok && height_ok) {
         ++aligned_frame_count_;
         if (aligned_frame_count_ >= visual_align_required_frames_) {
-          // 对准成功：电磁铁通电（仅此一次，整个抓取期间保持通电），舵机下放，开始下降到 20cm
+          // 对准成功：记录此刻无人机的真实 xy，作为后续下降/上升/重试的锁位坐标
+          // （黑圆实物位置可能不在航点 xy 上，所以用真实位置代替航点坐标）
+          aligned_x_cm_ = x_cm;
+          aligned_y_cm_ = y_cm;
+          has_aligned_position_ = true;
+          RCLCPP_INFO(
+            get_logger(),
+            "Alignment locked at (%.1f, %.1f) cm, descending with xy frozen",
+            aligned_x_cm_, aligned_y_cm_);
+          // 电磁铁通电（仅此一次，整个抓取期间保持通电），舵机下放，开始下降到 20cm
           publishElectromagnetControl(0x01);
           publishServoControl(0x01);
           setPhase(TaskPhase::PickupDescending, now_time);
@@ -600,6 +629,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           std_msgs::msg::Empty empty_msg;
           pickup_done_pub_->publish(empty_msg);
         }
+        has_aligned_position_ = false;  // 抓取成功，清掉锁位
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
         return;
@@ -618,6 +648,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           std_msgs::msg::Empty empty_msg;
           pickup_failed_pub_->publish(empty_msg);
         }
+        has_aligned_position_ = false;  // 放弃，清掉锁位
         setPhase(TaskPhase::Idle, now_time);
         // 直接跳到任务末尾，让 monitor 进入稳定停止分支；
         // 同时屏蔽 mission_complete 发送（这是失败终止，不应通知 STM32 关机）
@@ -626,9 +657,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       } else {
         RCLCPP_WARN(
           get_logger(),
-          "Pickup retry at target %zu (attempt %d/%d). Magnet stays ON.",
-          current_idx_, pickup_attempts_ + 1, pickup_max_attempts_);
-        // 重试：电磁铁保持通电（用户要求一次 0x01 持续到任务结束），重新对准抓取
+          "Pickup retry at target %zu (attempt %d/%d). Magnet stays ON, returning to aligned (%.1f, %.1f) at z=%.1f.",
+          current_idx_, pickup_attempts_ + 1, pickup_max_attempts_,
+          aligned_x_cm_, aligned_y_cm_, pickup_align_altitude_cm_);
+        // 重试：电磁铁保持通电；has_aligned_position_ 保持 true，
+        // getPublishedTarget 会用 aligned_x/y 作为目标，无人机回到上次对准位置（不是航点坐标）
         setPhase(TaskPhase::PickupAligning, now_time);
       }
       return;
