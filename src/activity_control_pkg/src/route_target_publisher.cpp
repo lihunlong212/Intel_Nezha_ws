@@ -119,6 +119,12 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     rclcpp::QoS(10),
     std::bind(&RouteTargetPublisherNode::fineDataCallback, this, std::placeholders::_1));
 
+  // 必须用节点的 clock 初始化所有 rclcpp::Time 成员，否则默认构造是 RCL_SYSTEM_TIME，
+  // 而 now() 返回 RCL_ROS_TIME，相减会抛 "can't subtract times with different time sources"。
+  phase_start_time_ = now();
+  visual_takeover_start_time_ = now();
+  last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+
   monitor_timer_ = create_wall_timer(
     std::chrono::duration<double>(kDefaultTimerPeriodSec),
     std::bind(&RouteTargetPublisherNode::monitorTimerCallback, this));
@@ -402,6 +408,12 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
 void RouteTargetPublisherNode::monitorTimerCallback()
 {
   std::lock_guard<std::mutex> lock(mutex_);
+
+  RCLCPP_INFO_THROTTLE(
+    get_logger(), *get_clock(), 2000,
+    "monitor alive: current_idx=%zu targets=%zu phase=%d has_height=%s",
+    current_idx_, targets_.size(), static_cast<int>(phase_),
+    has_height_ ? "true" : "false");
 
   if (current_idx_ != std::numeric_limits<std::size_t>::max() && current_idx_ >= targets_.size()) {
     std_msgs::msg::UInt8 active_msg;

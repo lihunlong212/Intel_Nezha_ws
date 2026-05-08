@@ -16,7 +16,11 @@ def generate_launch_description():
         Node(
             package="activity_control_pkg",
             executable="route_test_node",
-            name="route_test_node",
+            # 不设置 name=...：本可执行文件内部有 2 个节点
+            #   - RouteTargetPublisherNode 名为 "route_target_publisher"
+            #   - RouteTestNode 名为 "route_test_node"
+            # 设了 name 会把两个都强制改成同名，触发 DDS 同名冲突，
+            # 导致 /height 等订阅在节点之间错乱，状态机判断失败。
             output="screen",
             parameters=[
                 {
