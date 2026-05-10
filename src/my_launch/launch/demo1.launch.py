@@ -19,9 +19,12 @@ def generate_launch_description() -> LaunchDescription:
     fps = LaunchConfiguration("fps")
     show_preview = LaunchConfiguration("show_preview")
     fine_data_topic = LaunchConfiguration("fine_data_topic")
+    vision_mode_topic = LaunchConfiguration("vision_mode_topic")
     black_threshold = LaunchConfiguration("black_threshold")
     min_circle_area = LaunchConfiguration("min_circle_area")
     min_circularity = LaunchConfiguration("min_circularity")
+    apriltag_dictionary = LaunchConfiguration("apriltag_dictionary")
+    apriltag_target_id = LaunchConfiguration("apriltag_target_id")
 
     fly_carto_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(_package_launch("my_carto_pkg", "fly_carto.launch.py"))
@@ -48,9 +51,12 @@ def generate_launch_description() -> LaunchDescription:
             "fps": fps,
             "show_preview": show_preview,
             "fine_data_topic": fine_data_topic,
+            "vision_mode_topic": vision_mode_topic,
             "black_threshold": black_threshold,
             "min_circle_area": min_circle_area,
             "min_circularity": min_circularity,
+            "apriltag_dictionary": apriltag_dictionary,
+            "apriltag_target_id": apriltag_target_id,
         }.items(),
     )
 
@@ -87,6 +93,11 @@ def generate_launch_description() -> LaunchDescription:
                 description="Vision pixel-offset topic consumed by PID and activity control.",
             ),
             DeclareLaunchArgument(
+                "vision_mode_topic",
+                default_value="/vision_target_mode",
+                description="Vision mode topic: 0 idle, 1 black circle, 2 AprilTag.",
+            ),
+            DeclareLaunchArgument(
                 "black_threshold",
                 default_value="31",
                 description="Gray threshold for black target segmentation.",
@@ -100,6 +111,16 @@ def generate_launch_description() -> LaunchDescription:
                 "min_circularity",
                 default_value="0.45",
                 description="Minimum circularity, where 1.0 is a perfect circle.",
+            ),
+            DeclareLaunchArgument(
+                "apriltag_dictionary",
+                default_value="DICT_APRILTAG_36h11",
+                description="OpenCV ArUco AprilTag dictionary name.",
+            ),
+            DeclareLaunchArgument(
+                "apriltag_target_id",
+                default_value="-1",
+                description="-1 accepts any AprilTag id; otherwise only the specified id is used.",
             ),
             fly_carto_launch,
             uart_to_stm32_launch,

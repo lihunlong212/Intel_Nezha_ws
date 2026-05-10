@@ -40,7 +40,8 @@ enum class TaskPhase
   PickupHolding,     // 抓取：在 20cm 悬停一段时间，让磁铁吸住货物
   PickupAscending,   // 抓取：servo=00 已发，上升回 50cm（电磁铁仍通电吸住货物）
   PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑圆来判定成败
-  DropArriving,      // 投放：飞到 (x,y,50cm)
+  DropArriving,      // 投放：飞到 (x,y,40cm)
+  DropAligning,      // 投放：在 40cm 使用 AprilTag 视觉对准
   DropActing         // 投放：servo=01 已发，2s 内发 magnet=00 释放，结束发 servo=00
 };
 
@@ -67,6 +68,7 @@ private:
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
   void advanceToNextTarget();
   void publishVisualTakeoverState(bool active);
+  void publishVisionTargetMode(uint8_t mode);
   void publishServoControl(uint8_t state);
   void publishElectromagnetControl(uint8_t state);
   void setPhase(TaskPhase phase, const rclcpp::Time & now_time);
@@ -78,12 +80,14 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr target_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr active_controller_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr visual_takeover_active_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr vision_target_mode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr servo_control_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr electromagnet_control_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr mission_complete_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pickup_done_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pickup_failed_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr drop_done_pub_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr drop_failed_pub_;
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_sub_;
   rclcpp::TimerBase::SharedPtr monitor_timer_;
@@ -105,6 +109,7 @@ private:
   std::string map_frame_;
   std::string laser_link_frame_;
   std::string output_topic_;
+  std::string vision_mode_topic_;
 
   // 视觉对准参数
   double visual_align_pixel_threshold_;
@@ -121,7 +126,8 @@ private:
   double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑圆消失"（默认 1.0s）
 
   // 投放参数（独立时序，不受抓取参数影响）
-  double drop_altitude_cm_;                // 投放高度（默认 50cm）
+  double drop_altitude_cm_;                // 兼容旧参数；当前投放高度由 drop_align_altitude_cm 控制
+  double drop_align_altitude_cm_;          // 投放 AprilTag 对准高度（默认 40cm）
   double drop_servo_down_duration_sec_;    // 投放时舵机下放总时长（默认 2.0s）
   double drop_magnet_off_delay_sec_;       // 投放时舵机下放后多久断开电磁铁（默认 1.0s）
 

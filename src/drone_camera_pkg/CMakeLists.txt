@@ -8,7 +8,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(OpenCV REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio aruco)
 
 add_executable(drone_camera_node src/drone_camera_node.cpp)
 ament_target_dependencies(drone_camera_node rclcpp std_msgs)

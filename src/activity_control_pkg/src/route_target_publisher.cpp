@@ -20,6 +20,9 @@ namespace activity_control_pkg
 namespace
 {
 constexpr double kDefaultTimerPeriodSec = 0.05;
+constexpr uint8_t kVisionModeIdle = 0;
+constexpr uint8_t kVisionModeBlackCircle = 1;
+constexpr uint8_t kVisionModeAprilTag = 2;
 
 const char * phaseToString(TaskPhase phase)
 {
@@ -31,6 +34,7 @@ const char * phaseToString(TaskPhase phase)
     case TaskPhase::PickupAscending: return "PickupAscending";
     case TaskPhase::PickupObserving: return "PickupObserving";
     case TaskPhase::DropArriving: return "DropArriving";
+    case TaskPhase::DropAligning: return "DropAligning";
     case TaskPhase::DropActing: return "DropActing";
   }
   return "?";
@@ -53,6 +57,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pickup_max_attempts_(0),
   circle_lost_window_sec_(0.0),
   drop_altitude_cm_(0.0),
+  drop_align_altitude_cm_(0.0),
   drop_servo_down_duration_sec_(0.0),
   drop_magnet_off_delay_sec_(0.0),
   visual_takeover_active_(false),
@@ -74,6 +79,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   map_frame_ = declare_parameter("map_frame", "map");
   laser_link_frame_ = declare_parameter("laser_link_frame", "laser_link");
   output_topic_ = declare_parameter("output_topic", "/target_position");
+  vision_mode_topic_ = declare_parameter("vision_mode_topic", "/vision_target_mode");
 
   visual_align_pixel_threshold_ = declare_parameter("visual_align_pixel_threshold", 100.0);
   visual_align_required_frames_ = declare_parameter("visual_align_required_frames", 3);
@@ -88,7 +94,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pickup_max_attempts_ = declare_parameter("pickup_max_attempts", 3);
   circle_lost_window_sec_ = declare_parameter("circle_lost_window_sec", 1.0);
   // 投放参数（独立）
-  drop_altitude_cm_ = declare_parameter("drop_altitude_cm", 50.0);
+  drop_altitude_cm_ = declare_parameter("drop_altitude_cm", 40.0);
+  drop_align_altitude_cm_ = declare_parameter("drop_align_altitude_cm", 40.0);
   drop_servo_down_duration_sec_ = declare_parameter("drop_servo_down_duration_sec", 2.0);
   drop_magnet_off_delay_sec_ = declare_parameter("drop_magnet_off_delay_sec", 1.0);
 
@@ -100,6 +107,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   active_controller_pub_ = create_publisher<std_msgs::msg::UInt8>("/active_controller", durable_qos);
   visual_takeover_active_pub_ =
     create_publisher<std_msgs::msg::Bool>("/visual_takeover_active", durable_qos);
+  vision_target_mode_pub_ =
+    create_publisher<std_msgs::msg::UInt8>(vision_mode_topic_, durable_qos);
   servo_control_pub_ =
     create_publisher<std_msgs::msg::UInt8>("/servo_control", rclcpp::QoS(10).reliable());
   electromagnet_control_pub_ =
@@ -112,6 +121,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     create_publisher<std_msgs::msg::Empty>("/pickup_failed", rclcpp::QoS(10).reliable());
   drop_done_pub_ =
     create_publisher<std_msgs::msg::Empty>("/drop_done", rclcpp::QoS(10).reliable());
+  drop_failed_pub_ =
+    create_publisher<std_msgs::msg::Empty>("/drop_failed", rclcpp::QoS(10).reliable());
 
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
     "/height",
@@ -133,11 +144,13 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     std::bind(&RouteTargetPublisherNode::monitorTimerCallback, this));
 
   publishVisualTakeoverState(false);
+  publishVisionTargetMode(kVisionModeIdle);
 
   RCLCPP_INFO(
     get_logger(),
-    "RouteTargetPublisher initialized: map=%s laser_link=%s topic=%s",
-    map_frame_.c_str(), laser_link_frame_.c_str(), output_topic_.c_str());
+    "RouteTargetPublisher initialized: map=%s laser_link=%s topic=%s vision_mode_topic=%s",
+    map_frame_.c_str(), laser_link_frame_.c_str(), output_topic_.c_str(),
+    vision_mode_topic_.c_str());
   RCLCPP_INFO(
     get_logger(),
     "Tolerances: position=%.1fcm yaw=%.1fdeg height=%.1fcm",
@@ -154,8 +167,9 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     pickup_hold_at_grab_sec_, pickup_observe_sec_, pickup_max_attempts_);
   RCLCPP_INFO(
     get_logger(),
-    "Drop: z=%.1fcm servo_down=%.1fs magnet_off_delay=%.1fs",
-    drop_altitude_cm_, drop_servo_down_duration_sec_, drop_magnet_off_delay_sec_);
+    "Drop: legacy_z=%.1fcm align_z=%.1fcm servo_down=%.1fs magnet_off_delay=%.1fs",
+    drop_altitude_cm_, drop_align_altitude_cm_,
+    drop_servo_down_duration_sec_, drop_magnet_off_delay_sec_);
 }
 
 void RouteTargetPublisherNode::addTarget(const Target & target)
@@ -243,8 +257,9 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = pickup_grab_altitude_cm_;
       break;
     case TaskPhase::DropArriving:
+    case TaskPhase::DropAligning:
     case TaskPhase::DropActing:
-      published_target.z_cm = drop_altitude_cm_;
+      published_target.z_cm = drop_align_altitude_cm_;
       break;
     case TaskPhase::Idle:
     default:
@@ -374,6 +389,13 @@ void RouteTargetPublisherNode::publishVisualTakeoverState(bool active)
   visual_takeover_active_pub_->publish(msg);
 }
 
+void RouteTargetPublisherNode::publishVisionTargetMode(uint8_t mode)
+{
+  std_msgs::msg::UInt8 msg;
+  msg.data = mode;
+  vision_target_mode_pub_->publish(msg);
+}
+
 void RouteTargetPublisherNode::publishServoControl(uint8_t state)
 {
   std_msgs::msg::UInt8 msg;
@@ -404,16 +426,29 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   // 不会因为残余视觉数据 / 视野丢失而漂移。
   const bool takeover =
     phase == TaskPhase::PickupAligning ||
-    phase == TaskPhase::PickupObserving;
+    phase == TaskPhase::PickupObserving ||
+    phase == TaskPhase::DropAligning;
   if (visual_takeover_active_ != takeover) {
     visual_takeover_active_ = takeover;
     publishVisualTakeoverState(takeover);
   }
 
+  uint8_t vision_mode = kVisionModeIdle;
+  if (phase == TaskPhase::PickupAligning || phase == TaskPhase::PickupObserving) {
+    vision_mode = kVisionModeBlackCircle;
+  } else if (phase == TaskPhase::DropAligning) {
+    vision_mode = kVisionModeAprilTag;
+  }
+  publishVisionTargetMode(vision_mode);
+
   // 进入 PickupAligning 时重置帧计数 + 视觉超时起点（重试场景必须重置）
-  if (phase == TaskPhase::PickupAligning) {
+  if (phase == TaskPhase::PickupAligning || phase == TaskPhase::DropAligning) {
     aligned_frame_count_ = 0;
     visual_takeover_start_time_ = now_time;
+    has_fine_data_ = false;
+    fine_error_x_px_ = 0;
+    fine_error_y_px_ = 0;
+    last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
   }
 
   // 下发新阶段对应的目标位置（z 由 getPublishedTarget 调整）
@@ -440,6 +475,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       visual_takeover_active_ = false;
       publishVisualTakeoverState(false);
     }
+    publishVisionTargetMode(kVisionModeIdle);
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 2000,
       "All targets completed. Keeping stop signal active.");
@@ -671,13 +707,68 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "DropArriving %zu: target=(%.1f,%.1f,%.1f) current=(%.1f,%.1f,%.1f)",
-        current_idx_, target.x_cm, target.y_cm, drop_altitude_cm_, x_cm, y_cm, z_cm);
+        current_idx_, target.x_cm, target.y_cm, drop_align_altitude_cm_, x_cm, y_cm, z_cm);
 
       Target drop_target = target;
-      drop_target.z_cm = drop_altitude_cm_;
+      drop_target.z_cm = drop_align_altitude_cm_;
       if (isReached(drop_target, x_cm, y_cm, z_cm, yaw_deg)) {
-        publishServoControl(0x01);
-        setPhase(TaskPhase::DropActing, now_time);
+        setPhase(TaskPhase::DropAligning, now_time);
+      }
+      return;
+    }
+
+    case TaskPhase::DropAligning: {
+      if (phase_elapsed > visual_takeover_timeout_sec_) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Drop alignment timed out for target %zu after %.1fs. Failing without magnet release.",
+          current_idx_, phase_elapsed);
+        publishServoControl(0x00);
+        if (drop_failed_pub_) {
+          std_msgs::msg::Empty empty_msg;
+          drop_failed_pub_->publish(empty_msg);
+        }
+        setPhase(TaskPhase::Idle, now_time);
+        current_idx_ = targets_.size();
+        mission_complete_sent_ = true;
+        return;
+      }
+
+      if (!hasFreshFineData(now_time)) {
+        aligned_frame_count_ = 0;
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Waiting for fresh AprilTag /fine_data while aligning drop target %zu.", current_idx_);
+        return;
+      }
+
+      const double pixel_radius = std::hypot(
+        static_cast<double>(fine_error_x_px_),
+        static_cast<double>(fine_error_y_px_));
+      const double height_error_cm = drop_align_altitude_cm_ - z_cm;
+      const bool height_ok = std::fabs(height_error_cm) <= height_tol_cm_;
+      const bool xy_ok = pixel_radius < visual_align_pixel_threshold_;
+
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "DropAligning %zu: tag_x_px=%d tag_y_px=%d r=%.1f thr=%.1f h_err=%.1fcm z=%.1fcm frames=%d/%d",
+        current_idx_, fine_error_x_px_, fine_error_y_px_,
+        pixel_radius, visual_align_pixel_threshold_,
+        height_error_cm, z_cm,
+        aligned_frame_count_, visual_align_required_frames_);
+
+      if (xy_ok && height_ok) {
+        ++aligned_frame_count_;
+        if (aligned_frame_count_ >= visual_align_required_frames_) {
+          RCLCPP_INFO(
+            get_logger(),
+            "Drop alignment locked at 40cm for target %zu. Starting release action.",
+            current_idx_);
+          publishServoControl(0x01);
+          setPhase(TaskPhase::DropActing, now_time);
+        }
+      } else {
+        aligned_frame_count_ = 0;
       }
       return;
     }

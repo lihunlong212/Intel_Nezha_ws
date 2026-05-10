@@ -12,9 +12,12 @@ FPS = "15.0"
 SHOW_PREVIEW = "false"
 WINDOW_NAME = "drone_camera_preview"
 FINE_DATA_TOPIC = "/fine_data"
+VISION_MODE_TOPIC = "/vision_target_mode"
 BLACK_THRESHOLD = "31"
 MIN_CIRCLE_AREA = "10340.0"
 MIN_CIRCULARITY = "0.45"
+APRILTAG_DICTIONARY = "DICT_APRILTAG_36h11"
+APRILTAG_TARGET_ID = "-1"
 
 
 def generate_launch_description():
@@ -25,9 +28,12 @@ def generate_launch_description():
     show_preview = LaunchConfiguration("show_preview")
     window_name = LaunchConfiguration("window_name")
     fine_data_topic = LaunchConfiguration("fine_data_topic")
+    vision_mode_topic = LaunchConfiguration("vision_mode_topic")
     black_threshold = LaunchConfiguration("black_threshold")
     min_circle_area = LaunchConfiguration("min_circle_area")
     min_circularity = LaunchConfiguration("min_circularity")
+    apriltag_dictionary = LaunchConfiguration("apriltag_dictionary")
+    apriltag_target_id = LaunchConfiguration("apriltag_target_id")
 
     return LaunchDescription(
         [
@@ -67,6 +73,11 @@ def generate_launch_description():
                 description="Topic for publishing center offsets as Int32MultiArray.",
             ),
             DeclareLaunchArgument(
+                "vision_mode_topic",
+                default_value=VISION_MODE_TOPIC,
+                description="Topic for switching vision target mode: 0 idle, 1 black circle, 2 AprilTag.",
+            ),
+            DeclareLaunchArgument(
                 "black_threshold",
                 default_value=BLACK_THRESHOLD,
                 description="Gray threshold for black target segmentation. Larger values detect lighter dark objects.",
@@ -80,6 +91,16 @@ def generate_launch_description():
                 "min_circularity",
                 default_value=MIN_CIRCULARITY,
                 description="Minimum circularity, where 1.0 is a perfect circle.",
+            ),
+            DeclareLaunchArgument(
+                "apriltag_dictionary",
+                default_value=APRILTAG_DICTIONARY,
+                description="OpenCV ArUco AprilTag dictionary name.",
+            ),
+            DeclareLaunchArgument(
+                "apriltag_target_id",
+                default_value=APRILTAG_TARGET_ID,
+                description="-1 accepts any AprilTag id; otherwise only the specified id is used.",
             ),
             Node(
                 package="drone_camera_pkg",
@@ -95,9 +116,12 @@ def generate_launch_description():
                         "show_preview": ParameterValue(show_preview, value_type=bool),
                         "window_name": window_name,
                         "fine_data_topic": fine_data_topic,
+                        "vision_mode_topic": vision_mode_topic,
                         "black_threshold": ParameterValue(black_threshold, value_type=int),
                         "min_circle_area": ParameterValue(min_circle_area, value_type=float),
                         "min_circularity": ParameterValue(min_circularity, value_type=float),
+                        "apriltag_dictionary": apriltag_dictionary,
+                        "apriltag_target_id": ParameterValue(apriltag_target_id, value_type=int),
                     }
                 ],
             ),

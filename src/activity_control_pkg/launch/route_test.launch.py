@@ -27,6 +27,7 @@ def generate_launch_description():
                     "map_frame": "map",
                     "laser_link_frame": "laser_link",
                     "output_topic": "/target_position",
+                    "vision_mode_topic": "/vision_target_mode",
                     "position_tolerance_cm": 10.0,
                     "yaw_tolerance_deg": 5.0,
                     "height_tolerance_cm": 12.0,
@@ -42,7 +43,8 @@ def generate_launch_description():
                     "pickup_max_attempts": 3,
                     "circle_lost_window_sec": 1.0,
                     # 投放航点（type=3）参数
-                    "drop_altitude_cm": 50.0,
+                    "drop_altitude_cm": 40.0,
+                    "drop_align_altitude_cm": 40.0,
                     "drop_servo_down_duration_sec": 2.0,
                     "drop_magnet_off_delay_sec": 1.0,
                 }

@@ -52,12 +52,14 @@ class _LocalDomainListener:
         self.pickup_done = threading.Event()
         self.pickup_failed = threading.Event()
         self.drop_done = threading.Event()
+        self.drop_failed = threading.Event()
         self._context = Context()
         self._context.init(domain_id=domain_id)
         self._node = Node("dispatch_local_listener", context=self._context)
         self._node.create_subscription(Empty, "/pickup_done", self._on_pickup, 10)
         self._node.create_subscription(Empty, "/pickup_failed", self._on_pickup_failed, 10)
         self._node.create_subscription(Empty, "/drop_done", self._on_drop, 10)
+        self._node.create_subscription(Empty, "/drop_failed", self._on_drop_failed, 10)
         self._executor = SingleThreadedExecutor(context=self._context)
         self._executor.add_node(self._node)
         self._thread = threading.Thread(target=self._spin, daemon=True)
@@ -81,6 +83,10 @@ class _LocalDomainListener:
     def _on_drop(self, _msg: Empty) -> None:
         self._logger.info("received /drop_done from local domain")
         self.drop_done.set()
+
+    def _on_drop_failed(self, _msg: Empty) -> None:
+        self._logger.error("received /drop_failed from local domain")
+        self.drop_failed.set()
 
     def shutdown(self) -> None:
         try:
@@ -213,6 +219,18 @@ class DispatchActionServer(Node):
                     return self._finish_failed(
                         goal_handle, goal.task_id, "PICKUP_FAILED",
                         "pickup attempts exhausted (3/3), cargo not grabbed",
+                    )
+
+                if listener.drop_failed.is_set():
+                    elapsed_total = time.monotonic() - start_time
+                    self.get_logger().error(
+                        f"drop_failed received after {elapsed_total:.1f}s, aborting task as FAILED"
+                    )
+                    if proc.poll() is None:
+                        self._stop_subprocess(proc)
+                    return self._finish_failed(
+                        goal_handle, goal.task_id, "DROP_FAILED",
+                        "drop AprilTag alignment timed out, cargo not released",
                     )
 
                 # 子进程异常退出（在 drop_done 之前退出）→ 失败
