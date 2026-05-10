@@ -162,8 +162,13 @@ PositionPIDController::PositionPIDController()
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
+  // /target_position 由 route_target_publisher 用 TRANSIENT_LOCAL+RELIABLE 发布。
+  // 订阅端必须用同样的 durability，否则启动时 PID 后于 route_test_node 启动的话，
+  // 会错过第一条 latched 的 target 消息（启动竞态），导致 PID 永远拿不到目标，
+  // /target_velocity 一直不发，飞机不动。
+  auto target_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
   target_position_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
-    "/target_position", rclcpp::QoS(10),
+    "/target_position", target_qos,
     std::bind(&PositionPIDController::targetPositionCallback, this, std::placeholders::_1));
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
     "/height", rclcpp::QoS(10),

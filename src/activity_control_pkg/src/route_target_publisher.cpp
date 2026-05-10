@@ -82,7 +82,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
 
   // 抓取参数
   pickup_align_altitude_cm_ = declare_parameter("pickup_align_altitude_cm", 50.0);
-  pickup_grab_altitude_cm_ = declare_parameter("pickup_grab_altitude_cm", 20.0);
+  pickup_grab_altitude_cm_ = declare_parameter("pickup_grab_altitude_cm", 7.0);
   pickup_hold_at_grab_sec_ = declare_parameter("pickup_hold_at_grab_sec", 1.0);
   pickup_observe_sec_ = declare_parameter("pickup_observe_sec", 1.0);
   pickup_max_attempts_ = declare_parameter("pickup_max_attempts", 3);
@@ -754,9 +754,9 @@ std::vector<Target> RouteTestNode::buildRoute() const
 {
   // 航点 type: 1=普通  2=抓取  3=投放
   return std::vector<Target>{
-    Target{0.0,   0.0,   130.0, 0.0, 1},   // 起飞 / 巡航高度
-    Target{125.0, 100.0, 130.0, 0.0, 2},   // 抓取
-    Target{0.0,   0.0,   130.0, 0.0, 3},   // 投放（坐标按需调整）
+    Target{0.0,   0.0,   120.0, 0.0, 1},   // 起飞 / 巡航高度
+    Target{100.0, 0.0, 120.0, 0.0, 2},   // 抓取
+    Target{100.0, 100.0,   120.0, 0.0, 3},   // 投放（坐标按需调整）
     Target{0.0,   0.0,   0.0,   0.0, 1},   // 落地
   };
 }

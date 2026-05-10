@@ -36,7 +36,7 @@ def generate_launch_description():
                     "fine_data_stale_timeout_sec": 0.5,
                     # 抓取航点（type=2）参数
                     "pickup_align_altitude_cm": 50.0,
-                    "pickup_grab_altitude_cm": 20.0,
+                    "pickup_grab_altitude_cm": 7.0,
                     "pickup_hold_at_grab_sec": 1.0,
                     "pickup_observe_sec": 1.0,
                     "pickup_max_attempts": 3,

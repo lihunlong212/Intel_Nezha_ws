@@ -114,8 +114,8 @@ private:
 
   // 抓取参数
   double pickup_align_altitude_cm_;        // 抓取对准高度（默认 50cm）
-  double pickup_grab_altitude_cm_;         // 抓取下探高度（默认 20cm）
-  double pickup_hold_at_grab_sec_;         // 在 20cm 悬停吸附的时间（默认 1.0s）
+  double pickup_grab_altitude_cm_;         // 抓取下探高度（默认 7cm）
+  double pickup_hold_at_grab_sec_;         // 在 7cm 悬停吸附的时间（默认 1.0s）
   double pickup_observe_sec_;              // 上升回 50cm 后观察的窗口（默认 1.0s）
   int pickup_max_attempts_;                // 抓取最大重试次数（默认 3）
   double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑圆消失"（默认 1.0s）
