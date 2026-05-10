@@ -850,7 +850,7 @@ std::vector<Target> RouteTestNode::buildRoute() const
     Target{100.0, 100.0,   110.0, 0.0, 3},   // 投放（坐标按需调整）
     Target{100.0, 100.0,   110.0, 0.0, 1},
     Target{0.0, 0.0,   110.0, 0.0, 1},
-    Target{0.0,   0.0,   0.0,   0.0, 1},   // 落地
+    Target{0.0,   0.0,   0.0,   10.0, 1},   // 落地
   };
 }
 
