@@ -248,8 +248,15 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = pickup_align_altitude_cm_;
       break;
     case TaskPhase::PickupDescending:
+      // 下降：z=抓取高度；XY 仍给出对准位置作为参考，实际 XY 由视觉接管修正
+      if (has_aligned_position_) {
+        published_target.x_cm = aligned_x_cm_;
+        published_target.y_cm = aligned_y_cm_;
+      }
+      published_target.z_cm = pickup_grab_altitude_cm_;
+      break;
     case TaskPhase::PickupHolding:
-      // 下降 + 抓取悬停：xy 锁在对准位置（位置 PID 会让 xy 速度 ~0），z=20cm
+      // 抓取悬停：视觉关闭，xy 锁在对准位置，z=抓取高度
       if (has_aligned_position_) {
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
@@ -420,13 +427,17 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   phase_start_time_ = now_time;
   magnet_sent_in_phase_ = false;
 
-  // 视觉接管：仅在 PickupAligning（对准黑圆）和 PickupObserving（观察判定）开启。
-  // PickupDescending / PickupHolding / PickupAscending 期间关闭视觉，使用位置 PID
-  // 把 xy 锁在 aligned_x/y（对准成功时记录的真实位置），位置 PID 自然输出 xy 速度 ~0，
-  // 不会因为残余视觉数据 / 视野丢失而漂移。
-  const bool takeover =
+  // Visual takeover:
+  // - PickupAligning aligns over the black circle at the approach height.
+  // - PickupDescending keeps visual XY correction while descending to grab height.
+  // - PickupObserving enables vision to decide whether the circle is still visible.
+  // PID already holds XY velocity at zero if /fine_data becomes stale.
+  const bool pickup_visual_phase =
     phase == TaskPhase::PickupAligning ||
-    phase == TaskPhase::PickupObserving ||
+    phase == TaskPhase::PickupDescending ||
+    phase == TaskPhase::PickupObserving;
+  const bool takeover =
+    pickup_visual_phase ||
     phase == TaskPhase::DropAligning;
   if (visual_takeover_active_ != takeover) {
     visual_takeover_active_ = takeover;
@@ -434,7 +445,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   }
 
   uint8_t vision_mode = kVisionModeIdle;
-  if (phase == TaskPhase::PickupAligning || phase == TaskPhase::PickupObserving) {
+  if (pickup_visual_phase) {
     vision_mode = kVisionModeBlackCircle;
   } else if (phase == TaskPhase::DropAligning) {
     vision_mode = kVisionModeAprilTag;
@@ -589,9 +600,9 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           has_aligned_position_ = true;
           RCLCPP_INFO(
             get_logger(),
-            "Alignment locked at (%.1f, %.1f) cm, descending with xy frozen",
+            "Alignment locked at (%.1f, %.1f) cm, descending with visual XY correction",
             aligned_x_cm_, aligned_y_cm_);
-          // 电磁铁通电（仅此一次，整个抓取期间保持通电），舵机下放，开始下降到 20cm
+          // 电磁铁通电（仅此一次，整个抓取期间保持通电），舵机下放，开始下降到抓取高度
           publishElectromagnetControl(0x01);
           publishServoControl(0x01);
           setPhase(TaskPhase::PickupDescending, now_time);

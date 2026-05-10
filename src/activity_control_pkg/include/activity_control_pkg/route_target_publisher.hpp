@@ -36,8 +36,8 @@ enum class TaskPhase
 {
   Idle,              // 普通巡航 / 任务航点未开始
   PickupAligning,    // 抓取：在 50cm 视觉对准（高度 + XY）
-  PickupDescending,  // 抓取：magnet=01 + servo=01 已发，下降到 20cm（电磁铁全程通电）
-  PickupHolding,     // 抓取：在 20cm 悬停一段时间，让磁铁吸住货物
+  PickupDescending,  // 抓取：magnet=01 + servo=01 已发，视觉微调 XY 并下降到抓取高度
+  PickupHolding,     // 抓取：在抓取高度悬停一段时间，让磁铁吸住货物
   PickupAscending,   // 抓取：servo=00 已发，上升回 50cm（电磁铁仍通电吸住货物）
   PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑圆来判定成败
   DropArriving,      // 投放：飞到 (x,y,40cm)
