@@ -104,7 +104,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "min_circle_area",
-                default_value="10340.0",
+                default_value="800.0",
                 description="Minimum contour area for the black circle target.",
             ),
             DeclareLaunchArgument(

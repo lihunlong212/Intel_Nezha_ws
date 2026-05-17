@@ -515,16 +515,20 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       const double dy_now = target.y_cm - y_cm;
       const double dxy_now = std::hypot(dx_now, dy_now);
       const double dz_now = target.z_cm - z_cm;
-      const bool reached = isReached(target, x_cm, y_cm, z_cm, yaw_deg);
+      const bool is_task_target = target.type == 2 || target.type == 3;
+      const bool reached = is_task_target
+        ? dxy_now <= pos_tol_cm_
+        : isReached(target, x_cm, y_cm, z_cm, yaw_deg);
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "Idle target %zu type=%d: tgt=(%.1f,%.1f,%.1f) cur=(%.1f,%.1f,%.1f) dxy=%.1f dz=%.1f tol_xy=%.1f tol_z=%.1f has_height=%s reached=%s",
+        "Idle target %zu type=%d: tgt=(%.1f,%.1f,%.1f) cur=(%.1f,%.1f,%.1f) dxy=%.1f dz=%.1f tol_xy=%.1f tol_z=%.1f has_height=%s reached=%s%s",
         current_idx_, target.type,
         target.x_cm, target.y_cm, target.z_cm,
         x_cm, y_cm, z_cm,
         dxy_now, dz_now, pos_tol_cm_, height_tol_cm_,
         has_height_ ? "true" : "false",
-        reached ? "YES" : "no");
+        reached ? "YES" : "no",
+        is_task_target ? " (task xy trigger)" : "");
 
       if (!reached) {
         return;
@@ -545,7 +549,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         has_aligned_position_ = false;
         setPhase(TaskPhase::PickupAligning, now_time);
       } else if (target.type == 3) {
-        setPhase(TaskPhase::DropArriving, now_time);
+        setPhase(TaskPhase::DropAligning, now_time);
       } else {
         advanceToNextTarget();
       }
