@@ -363,6 +363,9 @@ std_msgs::msg::Float32MultiArray PositionPIDController::processPID(double dt)
 void PositionPIDController::controlTimerCallback()
 {
   if (!has_target_position_) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Waiting for /target_position. Check that route_target_publisher is running and publishing.");
     return;
   }
 

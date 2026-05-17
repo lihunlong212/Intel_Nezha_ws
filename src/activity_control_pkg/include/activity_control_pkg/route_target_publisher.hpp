@@ -142,6 +142,7 @@ private:
 
   int aligned_frame_count_;
   rclcpp::Time visual_takeover_start_time_;
+  rclcpp::Time last_target_republish_time_;
 
   // 抓取/投放子状态机
   TaskPhase phase_;

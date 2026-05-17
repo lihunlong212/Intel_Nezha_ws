@@ -1,7 +1,7 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
@@ -123,9 +123,9 @@ def generate_launch_description() -> LaunchDescription:
                 description="-1 accepts any AprilTag id; otherwise only the specified id is used.",
             ),
             fly_carto_launch,
-            uart_to_stm32_launch,
-            position_pid_controller_launch,
-            route_test_launch,
-            camera_launch,
+            TimerAction(period=2.0, actions=[uart_to_stm32_launch]),
+            TimerAction(period=4.0, actions=[camera_launch]),
+            TimerAction(period=6.0, actions=[position_pid_controller_launch]),
+            TimerAction(period=8.0, actions=[route_test_launch]),
         ]
     )

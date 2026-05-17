@@ -137,6 +137,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   // 而 now() 返回 RCL_ROS_TIME，相减会抛 "can't subtract times with different time sources"。
   phase_start_time_ = now();
   visual_takeover_start_time_ = now();
+  last_target_republish_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
   last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
 
   monitor_timer_ = create_wall_timer(
@@ -497,6 +498,21 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     return;
   }
 
+  const rclcpp::Time now_time = now();
+  if (current_idx_ < targets_.size()) {
+    const bool should_republish =
+      last_target_republish_time_.nanoseconds() == 0 ||
+      (now_time - last_target_republish_time_).seconds() >= 1.0;
+    if (should_republish) {
+      RCLCPP_DEBUG(
+        get_logger(),
+        "Republishing current target %zu as /target_position heartbeat.",
+        current_idx_);
+      publishTarget(getPublishedTarget(targets_[current_idx_]), false);
+      last_target_republish_time_ = now_time;
+    }
+  }
+
   double x_cm = 0.0;
   double y_cm = 0.0;
   double z_cm = 0.0;
@@ -506,7 +522,6 @@ void RouteTargetPublisherNode::monitorTimerCallback()
   }
 
   const Target & target = targets_[current_idx_];
-  const rclcpp::Time now_time = now();
   const double phase_elapsed = (now_time - phase_start_time_).seconds();
 
   switch (phase_) {
