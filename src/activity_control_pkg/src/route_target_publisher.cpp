@@ -53,6 +53,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pickup_align_altitude_cm_(0.0),
   pickup_grab_altitude_cm_(0.0),
   pickup_hold_at_grab_sec_(0.0),
+  pickup_check_altitude_cm_(0.0),
+  pickup_check_observe_sec_(0.0),
   pickup_observe_sec_(0.0),
   pickup_max_attempts_(0),
   circle_lost_window_sec_(0.0),
@@ -62,6 +64,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   drop_magnet_off_delay_sec_(0.0),
   visual_takeover_active_(false),
   has_fine_data_(false),
+  pickup_observed_fine_data_(false),
   fine_error_x_px_(0),
   fine_error_y_px_(0),
   mission_complete_sent_(false),
@@ -90,7 +93,9 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pickup_align_altitude_cm_ = declare_parameter("pickup_align_altitude_cm", 50.0);
   pickup_grab_altitude_cm_ = declare_parameter("pickup_grab_altitude_cm", 7.0);
   pickup_hold_at_grab_sec_ = declare_parameter("pickup_hold_at_grab_sec", 1.0);
-  pickup_observe_sec_ = declare_parameter("pickup_observe_sec", 1.0);
+  pickup_check_altitude_cm_ = declare_parameter("pickup_check_altitude_cm", 60.0);
+  pickup_check_observe_sec_ = declare_parameter("pickup_check_observe_sec", 2.0);
+  pickup_observe_sec_ = declare_parameter("pickup_observe_sec", pickup_check_observe_sec_);
   pickup_max_attempts_ = declare_parameter("pickup_max_attempts", 3);
   circle_lost_window_sec_ = declare_parameter("circle_lost_window_sec", 1.0);
   // 投放参数（独立）
@@ -163,9 +168,10 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     visual_takeover_timeout_sec_, fine_data_stale_timeout_sec_);
   RCLCPP_INFO(
     get_logger(),
-    "Pickup: align_z=%.1fcm grab_z=%.1fcm hold=%.1fs observe=%.1fs max_attempts=%d",
+    "Pickup: align_z=%.1fcm grab_z=%.1fcm hold=%.1fs check_z=%.1fcm check_observe=%.1fs max_attempts=%d",
     pickup_align_altitude_cm_, pickup_grab_altitude_cm_,
-    pickup_hold_at_grab_sec_, pickup_observe_sec_, pickup_max_attempts_);
+    pickup_hold_at_grab_sec_, pickup_check_altitude_cm_,
+    pickup_check_observe_sec_, pickup_max_attempts_);
   RCLCPP_INFO(
     get_logger(),
     "Drop: legacy_z=%.1fcm align_z=%.1fcm servo_down=%.1fs magnet_off_delay=%.1fs",
@@ -220,11 +226,17 @@ void RouteTargetPublisherNode::publishTarget(const Target & target, bool init_fl
   active_msg.data = 2;
   active_controller_pub_->publish(active_msg);
 
-  RCLCPP_INFO(
-    get_logger(),
-    "Published target: x=%.1fcm y=%.1fcm z=%.1fcm yaw=%.1fdeg type=%d%s",
-    target.x_cm, target.y_cm, target.z_cm, target.yaw_deg, target.type,
-    init_flag ? " (first)" : "");
+  if (init_flag) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Published first target: x=%.1fcm y=%.1fcm z=%.1fcm yaw=%.1fdeg type=%d",
+      target.x_cm, target.y_cm, target.z_cm, target.yaw_deg, target.type);
+  } else {
+    RCLCPP_DEBUG(
+      get_logger(),
+      "Published target: x=%.1fcm y=%.1fcm z=%.1fcm yaw=%.1fdeg type=%d",
+      target.x_cm, target.y_cm, target.z_cm, target.yaw_deg, target.type);
+  }
 }
 
 Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
@@ -246,7 +258,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
       }
-      published_target.z_cm = pickup_align_altitude_cm_;
+      published_target.z_cm = pickup_check_altitude_cm_;
       break;
     case TaskPhase::PickupDescending:
       // 下降：z=抓取高度；XY 仍给出对准位置作为参考，实际 XY 由视觉接管修正
@@ -281,7 +293,7 @@ void RouteTargetPublisherNode::heightCallback(const std_msgs::msg::Int16::Shared
 {
   current_height_cm_ = static_cast<double>(msg->data);
   has_height_ = true;
-  RCLCPP_INFO_THROTTLE(
+  RCLCPP_DEBUG_THROTTLE(
     get_logger(), *get_clock(), 1000,
     "Route monitor received /height: %.1fcm",
     current_height_cm_);
@@ -298,6 +310,9 @@ void RouteTargetPublisherNode::fineDataCallback(const std_msgs::msg::Int32MultiA
   fine_error_y_px_ = msg->data[1];
   has_fine_data_ = true;
   last_fine_data_time_ = now();
+  if (phase_ == TaskPhase::PickupObserving) {
+    pickup_observed_fine_data_ = true;
+  }
 }
 
 bool RouteTargetPublisherNode::getCurrentPose(
@@ -463,6 +478,14 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
     last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
   }
 
+  if (phase == TaskPhase::PickupObserving) {
+    pickup_observed_fine_data_ = false;
+    has_fine_data_ = false;
+    fine_error_x_px_ = 0;
+    fine_error_y_px_ = 0;
+    last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+  }
+
   // 下发新阶段对应的目标位置（z 由 getPublishedTarget 调整）
   if (current_idx_ < targets_.size()) {
     publishTarget(getPublishedTarget(targets_[current_idx_]), false);
@@ -473,7 +496,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  RCLCPP_INFO_THROTTLE(
+  RCLCPP_DEBUG_THROTTLE(
     get_logger(), *get_clock(), 2000,
     "monitor alive: current_idx=%zu targets=%zu phase=%d has_height=%s",
     current_idx_, targets_.size(), static_cast<int>(phase_),
@@ -534,7 +557,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       const bool reached = is_task_target
         ? dxy_now <= pos_tol_cm_
         : isReached(target, x_cm, y_cm, z_cm, yaw_deg);
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "Idle target %zu type=%d: tgt=(%.1f,%.1f,%.1f) cur=(%.1f,%.1f,%.1f) dxy=%.1f dz=%.1f tol_xy=%.1f tol_z=%.1f has_height=%s reached=%s%s",
         current_idx_, target.type,
@@ -600,7 +623,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       const bool height_ok = std::fabs(height_error_cm) <= height_tol_cm_;
       const bool xy_ok = pixel_radius < visual_align_pixel_threshold_;
 
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "PickupAligning %zu: x_px=%d y_px=%d r=%.1f thr=%.1f h_err=%.1fcm z=%.1fcm frames=%d/%d attempt=%d/%d",
         current_idx_, fine_error_x_px_, fine_error_y_px_,
@@ -634,7 +657,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
     case TaskPhase::PickupDescending: {
       const double height_error_cm = pickup_grab_altitude_cm_ - z_cm;
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 500,
         "PickupDescending %zu: z=%.1fcm target=%.1fcm err=%.1fcm",
         current_idx_, z_cm, pickup_grab_altitude_cm_, height_error_cm);
@@ -645,7 +668,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     }
 
     case TaskPhase::PickupHolding: {
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 500,
         "PickupHolding %zu: elapsed=%.2fs / %.2fs (magnet ON, grabbing)",
         current_idx_, phase_elapsed, pickup_hold_at_grab_sec_);
@@ -658,11 +681,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     }
 
     case TaskPhase::PickupAscending: {
-      const double height_error_cm = pickup_align_altitude_cm_ - z_cm;
-      RCLCPP_INFO_THROTTLE(
+      const double height_error_cm = pickup_check_altitude_cm_ - z_cm;
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 500,
-        "PickupAscending %zu: z=%.1fcm target=%.1fcm err=%.1fcm (magnet still ON)",
-        current_idx_, z_cm, pickup_align_altitude_cm_, height_error_cm);
+        "PickupAscending %zu: z=%.1fcm check_target=%.1fcm err=%.1fcm (magnet still ON)",
+        current_idx_, z_cm, pickup_check_altitude_cm_, height_error_cm);
       if (std::fabs(height_error_cm) <= height_tol_cm_) {
         setPhase(TaskPhase::PickupObserving, now_time);
       }
@@ -670,20 +693,19 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     }
 
     case TaskPhase::PickupObserving: {
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 500,
-        "PickupObserving %zu: elapsed=%.2fs / %.2fs",
-        current_idx_, phase_elapsed, pickup_observe_sec_);
-      if (phase_elapsed < pickup_observe_sec_) {
+        "PickupObserving %zu: elapsed=%.2fs / %.2fs fine_seen=%s",
+        current_idx_, phase_elapsed, pickup_check_observe_sec_,
+        pickup_observed_fine_data_ ? "true" : "false");
+      if (phase_elapsed < pickup_check_observe_sec_) {
         return;
       }
 
       // 成败判定：观察期内是否还能在 /fine_data 上看到黑圆
       // 抓取成功 → 黑圆被吸走 → /fine_data 过期 → circle_seen=false
       // 抓取失败 → 黑圆还在地上 → /fine_data 持续刷新 → circle_seen=true
-      const bool circle_seen =
-        hasFreshFineData(now_time) &&
-        (now_time - last_fine_data_time_).seconds() <= circle_lost_window_sec_;
+      const bool circle_seen = pickup_observed_fine_data_;
 
       if (!circle_seen) {
         RCLCPP_INFO(
@@ -734,7 +756,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     }
 
     case TaskPhase::DropArriving: {
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "DropArriving %zu: target=(%.1f,%.1f,%.1f) current=(%.1f,%.1f,%.1f)",
         current_idx_, target.x_cm, target.y_cm, drop_align_altitude_cm_, x_cm, y_cm, z_cm);
@@ -779,7 +801,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       const bool height_ok = std::fabs(height_error_cm) <= height_tol_cm_;
       const bool xy_ok = pixel_radius < visual_align_pixel_threshold_;
 
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "DropAligning %zu: tag_x_px=%d tag_y_px=%d r=%.1f thr=%.1f h_err=%.1fcm z=%.1fcm frames=%d/%d",
         current_idx_, fine_error_x_px_, fine_error_y_px_,
@@ -810,7 +832,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         magnet_sent_in_phase_ = true;
         RCLCPP_INFO(get_logger(), "DropActing: magnet OFF at t=%.2fs", phase_elapsed);
       }
-      RCLCPP_INFO_THROTTLE(
+      RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 500,
         "DropActing %zu: elapsed=%.2fs / %.2fs (magnet_sent=%s)",
         current_idx_, phase_elapsed, drop_servo_down_duration_sec_,

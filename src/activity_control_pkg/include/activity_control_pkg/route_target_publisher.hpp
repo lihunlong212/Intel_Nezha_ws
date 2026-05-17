@@ -121,7 +121,9 @@ private:
   double pickup_align_altitude_cm_;        // 抓取对准高度（默认 50cm）
   double pickup_grab_altitude_cm_;         // 抓取下探高度（默认 7cm）
   double pickup_hold_at_grab_sec_;         // 在 7cm 悬停吸附的时间（默认 1.0s）
-  double pickup_observe_sec_;              // 上升回 50cm 后观察的窗口（默认 1.0s）
+  double pickup_check_altitude_cm_;        // 抓取后判断高度（默认 60cm）
+  double pickup_check_observe_sec_;        // 判断高度观察窗口（默认 2.0s）
+  double pickup_observe_sec_;              // 兼容旧参数；当前判断窗口由 pickup_check_observe_sec 控制
   int pickup_max_attempts_;                // 抓取最大重试次数（默认 3）
   double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑圆消失"（默认 1.0s）
 
@@ -134,6 +136,7 @@ private:
   // 视觉接管 / fine_data 状态
   bool visual_takeover_active_;
   bool has_fine_data_;
+  bool pickup_observed_fine_data_;
   int fine_error_x_px_;
   int fine_error_y_px_;
   rclcpp::Time last_fine_data_time_;

@@ -149,7 +149,7 @@ void UartToStm32::processTfTransform(const geometry_msgs::msg::TransformStamped 
   current_yaw_ = yaw;
   yaw_valid_ = true;
 
-  RCLCPP_INFO_THROTTLE(
+  RCLCPP_DEBUG_THROTTLE(
     node_->get_logger(), *node_->get_clock(), 2000,
     "Transform %s -> %s: pos(%.3f, %.3f, %.3f) rot(%.3f, %.3f, %.3f)",
     source_frame_.c_str(), target_frame_.c_str(), x, y, z, roll, pitch, yaw);
@@ -176,7 +176,7 @@ void UartToStm32::velocityCallback(const geometry_msgs::msg::Twist::SharedPtr ms
   const double angular_y = msg->angular.y;
   const double angular_z = msg->angular.z;
 
-  RCLCPP_INFO_THROTTLE(
+  RCLCPP_DEBUG_THROTTLE(
     node_->get_logger(), *node_->get_clock(), 2000,
     "Velocity: linear(%.3f, %.3f, %.3f) angular(%.3f, %.3f, %.3f)",
     linear_x, linear_y, linear_z, angular_x, angular_y, angular_z);
@@ -197,7 +197,7 @@ Eigen::Vector3d UartToStm32::transformVelocity(const Eigen::Vector3d & linear, d
 
   const Eigen::Vector3d transformed = Rz * linear;
 
-  RCLCPP_INFO_THROTTLE(
+  RCLCPP_DEBUG_THROTTLE(
     node_->get_logger(), *node_->get_clock(), 2000,
     "Velocity transform: yaw=%.3f deg, original(%.3f,%.3f,%.3f) -> transformed(%.3f,%.3f,%.3f)",
     yaw * 180.0 / M_PI,
@@ -231,7 +231,7 @@ void UartToStm32::sendVelocityToSerial(const Eigen::Vector3d & transformed_veloc
     data[5] = static_cast<uint8_t>((vel_z >> 8) & 0xFF);
 
     if (serial_comm_->send_protocol_data(VELOCITY_FRAME_ID, static_cast<uint8_t>(data.size()), data)) {
-      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+      RCLCPP_DEBUG_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
         "Sent velocity data: x=%d, y=%d, z=%d (cm/s)", vel_x, vel_y, vel_z);
     } else {
       RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
@@ -262,7 +262,7 @@ void UartToStm32::targetVelocityCallback(const std_msgs::msg::Float32MultiArray:
   const float vz_cm_per_s = msg->data[2];
   const float vyaw_deg_per_s = msg->data[3];
 
-  RCLCPP_INFO_THROTTLE(
+  RCLCPP_DEBUG_THROTTLE(
     node_->get_logger(), *node_->get_clock(), 1000,
     "Target Velocity: linear(%.1f, %.1f, %.1f)cm/s angular(%.1f)deg/s",
     vx_cm_per_s, vy_cm_per_s, vz_cm_per_s, vyaw_deg_per_s);
@@ -296,7 +296,7 @@ void UartToStm32::sendTargetVelocityToSerial(
     data[7] = static_cast<uint8_t>((vel_yaw >> 8) & 0xFF);
 
     if (serial_comm_->send_protocol_data(TARGET_VELOCITY_FRAME_ID, static_cast<uint8_t>(data.size()), data)) {
-      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+      RCLCPP_DEBUG_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
         "Sent target velocity data: x=%d, y=%d, z=%d, yaw=%d",
         vel_x, vel_y, vel_z, vel_yaw);
     } else {
@@ -352,7 +352,7 @@ void UartToStm32::protocolDataHandler(uint8_t id, const std::vector<uint8_t> & d
       msg.data = value;
       if (height_pub_) {
         height_pub_->publish(msg);
-        RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+        RCLCPP_DEBUG_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
           "Published /height: %d", value);
       } else {
         RCLCPP_WARN(node_->get_logger(), "Height publisher not initialized");
@@ -371,7 +371,7 @@ void UartToStm32::protocolDataHandler(uint8_t id, const std::vector<uint8_t> & d
       int16_t vel_z = static_cast<int16_t>(data[4] | (data[5] << 8));
       int16_t yaw = static_cast<int16_t>(data[6] | (data[7] << 8));
 
-      RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+      RCLCPP_DEBUG_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
         "[0xB1] Target Speed -> X:%d, Y:%d, Z:%d, Yaw:%d",
         vel_x, vel_y, vel_z, yaw);
 
