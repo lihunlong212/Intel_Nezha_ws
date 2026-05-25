@@ -16,7 +16,9 @@ from ament_index_python.packages import PackageNotFoundError, get_package_share_
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.time import Time
 from std_msgs.msg import Empty, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 
 PACKAGE_NAME = "robot_action_demo"
@@ -100,6 +102,64 @@ class LocalDomainListener:
             pass
 
 
+class LocalTelemetryListener:
+    """Keeps a TF listener alive in the local task domain for x/y/z status reporting."""
+
+    def __init__(self, parent_logger, domain_id: int, map_frame: str, robot_frame: str) -> None:
+        self._logger = parent_logger
+        self._map_frame = map_frame
+        self._robot_frame = robot_frame
+        self._context = Context()
+        self._context.init(domain_id=domain_id)
+        self._node = Node("dispatch_worker_local_telemetry", context=self._context)
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self._node)
+        self._executor = SingleThreadedExecutor(context=self._context)
+        self._executor.add_node(self._node)
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        self._logger.info(
+            f"local telemetry started on DOMAIN={domain_id}: {map_frame}->{robot_frame}"
+        )
+
+    def _spin(self) -> None:
+        try:
+            self._executor.spin()
+        except Exception as exc:  # pragma: no cover
+            self._logger.error(f"local telemetry spin crashed: {exc}")
+
+    def get_position_cm(self) -> dict[str, float] | None:
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._map_frame,
+                self._robot_frame,
+                Time(),
+            )
+        except TransformException:
+            return None
+
+        translation = transform.transform.translation
+        return {
+            "x": round(float(translation.x) * 100.0, 2),
+            "y": round(float(translation.y) * 100.0, 2),
+            "z": round(float(translation.z) * 100.0, 2),
+        }
+
+    def shutdown(self) -> None:
+        try:
+            self._executor.shutdown()
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            self._node.destroy_node()
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            self._context.shutdown()
+        except Exception:  # pragma: no cover
+            pass
+
+
 def parse_args(args: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description="Device worker for dispatch orders.")
     parser.add_argument("--device-id", default=os.environ.get("DISPATCH_DEVICE_ID", "drone1"))
@@ -107,6 +167,8 @@ def parse_args(args: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--cargo-item", default=os.environ.get("DISPATCH_CARGO_ITEM", ""))
     parser.add_argument("--cargo-quantity", type=int, default=int(os.environ.get("DISPATCH_CARGO_QTY", "0")))
     parser.add_argument("--status-period", type=float, default=1.0)
+    parser.add_argument("--map-frame", default=os.environ.get("DISPATCH_MAP_FRAME", "map"))
+    parser.add_argument("--robot-frame", default=os.environ.get("DISPATCH_ROBOT_FRAME", "laser_link"))
     parsed, ros_args = parser.parse_known_args(args)
     return parsed, ros_args
 
@@ -121,6 +183,12 @@ class DispatchWorker(Node):
         self._active_cancel = threading.Event()
         self._active_process: subprocess.Popen | None = None
         self._target_domain_id, self._tasks = self._load_config()
+        self._telemetry = LocalTelemetryListener(
+            self.get_logger(),
+            int(self._target_domain_id),
+            str(worker_args.map_frame),
+            str(worker_args.robot_frame),
+        )
 
         self._events_pub = self.create_publisher(String, EVENTS_TOPIC, 50)
         self._status_pub = self.create_publisher(String, STATUS_TOPIC, 10)
@@ -407,10 +475,16 @@ class DispatchWorker(Node):
 
     def _publish_event(self, payload: dict[str, Any]) -> None:
         payload.setdefault("created_at", time.time())
+        position = self._current_position_payload()
+        if position is not None:
+            payload.setdefault("position", position)
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)
         self._events_pub.publish(msg)
         self.get_logger().info(f"event: {msg.data}")
+
+    def _current_position_payload(self) -> dict[str, float] | None:
+        return self._telemetry.get_position_cm()
 
     def _publish_status(self) -> None:
         with self._lock:
@@ -427,9 +501,15 @@ class DispatchWorker(Node):
             "working": busy,
             "active_task_id": active_task_id,
         }
+        position = self._current_position_payload()
+        if position is not None:
+            payload["position"] = position
         msg = String()
         msg.data = json.dumps(payload, ensure_ascii=False)
         self._status_pub.publish(msg)
+
+    def shutdown(self) -> None:
+        self._telemetry.shutdown()
 
 
 def main(args=None) -> None:
@@ -441,6 +521,7 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        node.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 
