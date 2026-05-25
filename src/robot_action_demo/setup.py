@@ -22,6 +22,8 @@ setup(
         "console_scripts": [
             "dispatch_server = robot_action_demo.dispatch_server:main",
             "dispatch_client = robot_action_demo.dispatch_client:main",
+            "dispatch_topic_hub_server = robot_action_demo.dispatch_topic_hub_server:main",
+            "dispatch_worker = robot_action_demo.dispatch_worker:main",
         ],
     },
 )

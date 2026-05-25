@@ -1,8 +1,15 @@
 string task_id
+string action
+string device_type
+string device_id
 string item
 int32 quantity
 string src_location
 string dst_location
+string transfer_to_device_type
+string transfer_to_device_id
+string final_dst_location
+string plan
 ---
 bool success
 string task_id

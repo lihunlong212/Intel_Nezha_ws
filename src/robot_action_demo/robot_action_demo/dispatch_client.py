@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import sys
 import time
@@ -12,21 +14,33 @@ from robot_task_interfaces.action import DispatchOrder
 class DispatchActionClient(Node):
     def __init__(self) -> None:
         super().__init__("dispatch_action_client")
-        self._client = ActionClient(self, DispatchOrder, "dispatch_order")
+        self._client = ActionClient(self, DispatchOrder, "/dispatch_order")
         self._goal_done = False
         self._result = None
 
-    def send_goal(self, task_id: str, item: str, quantity: int, src: str, dst: str):
+    def send_goal(self, args: argparse.Namespace):
         goal_msg = DispatchOrder.Goal()
-        goal_msg.task_id = task_id
-        goal_msg.item = item
-        goal_msg.quantity = quantity
-        goal_msg.src_location = src
-        goal_msg.dst_location = dst
+        goal_msg.task_id = args.task_id
+        goal_msg.action = args.action
+        goal_msg.device_type = args.device_type
+        goal_msg.device_id = args.device_id
+        goal_msg.item = args.item
+        goal_msg.quantity = args.quantity
+        goal_msg.src_location = args.src
+        goal_msg.dst_location = args.dst
+        goal_msg.transfer_to_device_type = args.transfer_to_device_type
+        goal_msg.transfer_to_device_id = args.transfer_to_device_id
+        goal_msg.final_dst_location = args.final_dst_location
+        goal_msg.plan = args.plan
 
-        self.get_logger().info("waiting for action server...")
+        self.get_logger().info("waiting for /dispatch_order action server...")
         self._client.wait_for_server()
-        self.get_logger().info("sending goal...")
+        self.get_logger().info(
+            (
+                f"sending goal task_id={goal_msg.task_id} action={goal_msg.action} "
+                f"target={goal_msg.device_type}/{goal_msg.device_id}"
+            )
+        )
         return self._client.send_goal_async(
             goal_msg,
             feedback_callback=self.feedback_callback,
@@ -53,38 +67,41 @@ class DispatchActionClient(Node):
         result_future.add_done_callback(self.handle_result)
 
     def handle_result(self, future) -> None:
-        self._result = future.result().result
+        wrapper = future.result()
+        self._result = wrapper.result
         self._goal_done = True
         self.get_logger().info(
-            "result: success=%s final_state=%s detail=%s",
+            "result: status=%s success=%s final_state=%s detail=%s",
+            wrapper.status,
             self._result.success,
             self._result.final_state,
             self._result.detail,
         )
 
 
-def parse_args():
+def parse_args(args: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-id", default=f"task-{int(time.time())}")
-    parser.add_argument("--item", default="华为手机")
+    parser.add_argument("--action", default="call_drone")
+    parser.add_argument("--device-type", default="drone")
+    parser.add_argument("--device-id", default="drone1")
+    parser.add_argument("--item", default="phone")
     parser.add_argument("--quantity", type=int, default=1)
-    parser.add_argument("--src", default="货架")
-    parser.add_argument("--dst", default="收银台")
-    return parser.parse_args()
+    parser.add_argument("--src", default="shelf")
+    parser.add_argument("--dst", default="checkout")
+    parser.add_argument("--transfer-to-device-type", default="")
+    parser.add_argument("--transfer-to-device-id", default="")
+    parser.add_argument("--final-dst-location", default="")
+    parser.add_argument("--plan", default="direct_drone_delivery")
+    return parser.parse_known_args(args)
 
 
 def main(args=None) -> None:
-    cli_args = parse_args()
-    rclpy.init(args=args)
+    cli_args, ros_args = parse_args(args)
+    rclpy.init(args=ros_args)
     node = DispatchActionClient()
     try:
-        future = node.send_goal(
-            cli_args.task_id,
-            cli_args.item,
-            cli_args.quantity,
-            cli_args.src,
-            cli_args.dst,
-        )
+        future = node.send_goal(cli_args)
         future.add_done_callback(node.handle_goal_response)
 
         while rclpy.ok() and not node._goal_done:
@@ -100,4 +117,4 @@ def main(args=None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
