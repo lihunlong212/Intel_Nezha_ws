@@ -21,7 +21,7 @@ namespace
 {
 constexpr double kDefaultTimerPeriodSec = 0.05;
 constexpr uint8_t kVisionModeIdle = 0;
-constexpr uint8_t kVisionModeBlackCircle = 1;
+constexpr uint8_t kVisionModeBlackSquare = 1;
 constexpr uint8_t kVisionModeAprilTag = 2;
 
 const char * phaseToString(TaskPhase phase)
@@ -247,7 +247,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
   Target published_target = target;
   switch (phase_) {
     case TaskPhase::PickupAligning:
-      // 第一次对准：用航点 xy；重试时：用上一次对准成功时记录的 xy（更接近实际黑圆位置）
+      // 第一次对准：用航点 xy；重试时：用上一次对准成功时记录的 xy（更接近实际黑色正方形片位置）
       if (has_aligned_position_) {
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
@@ -499,9 +499,9 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   magnet_sent_in_phase_ = false;
 
   // Visual takeover:
-  // - PickupAligning aligns over the black circle at the approach height.
+  // - PickupAligning aligns over the black square at the approach height.
   // - PickupDescending keeps visual XY correction while descending to grab height.
-  // - PickupObserving enables vision to decide whether the circle is still visible.
+  // - PickupObserving enables vision to decide whether the square is still visible.
   // PID already holds XY velocity at zero if /fine_data becomes stale.
   const bool pickup_visual_phase =
     phase == TaskPhase::PickupAligning ||
@@ -517,7 +517,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
 
   uint8_t vision_mode = kVisionModeIdle;
   if (pickup_visual_phase) {
-    vision_mode = kVisionModeBlackCircle;
+    vision_mode = kVisionModeBlackSquare;
   } else if (phase == TaskPhase::DropAligning) {
     vision_mode = kVisionModeAprilTag;
   }
@@ -691,7 +691,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         ++aligned_frame_count_;
         if (aligned_frame_count_ >= visual_align_required_frames_) {
           // 对准成功：记录此刻无人机的真实 xy，作为后续下降/上升/重试的锁位坐标
-          // （黑圆实物位置可能不在航点 xy 上，所以用真实位置代替航点坐标）
+          // （黑色正方形片实物位置可能不在航点 xy 上，所以用真实位置代替航点坐标）
           aligned_x_cm_ = x_cm;
           aligned_y_cm_ = y_cm;
           has_aligned_position_ = true;
@@ -757,12 +757,10 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         return;
       }
 
-      // 成败判定：观察期内是否还能在 /fine_data 上看到黑圆
-      // 抓取成功 → 黑圆被吸走 → /fine_data 过期 → circle_seen=false
-      // 抓取失败 → 黑圆还在地上 → /fine_data 持续刷新 → circle_seen=true
-      const bool circle_seen = pickup_observed_fine_data_;
+      // Pickup succeeds when the black square disappears from /fine_data during observation.
+      const bool square_seen = pickup_observed_fine_data_;
 
-      if (!circle_seen) {
+      if (!square_seen) {
         RCLCPP_INFO(
           get_logger(),
           "Pickup SUCCESS at target %zu (attempt %d/%d). Advancing.",
@@ -967,9 +965,8 @@ std::vector<Target> RouteTestNode::buildRoute() const
   // 航点 type: 1=普通  2=抓取  3=投放
   return std::vector<Target>{
     Target{0.0,   0.0,   110.0, 0.0, 1},   // 起飞 / 巡航高度
-    Target{100.0, 0.0, 110.0, 0.0, 2},   // 抓取
-    Target{100.0, 100.0,   110.0, 0.0, 3},   // 投放（坐标按需调整）
-    Target{100.0, 100.0,   110.0, 0.0, 1},
+    Target{20.0, 100.0, 110.0, 0.0, 2},   // 抓取
+    Target{125.0, 100.0,   110.0, 0.0, 3},   // 投放（坐标按需调整）
     Target{0.0, 0.0,   110.0, 0.0, 1},
     Target{0.0,   0.0,   0.0,   10.0, 1},   // 落地
   };

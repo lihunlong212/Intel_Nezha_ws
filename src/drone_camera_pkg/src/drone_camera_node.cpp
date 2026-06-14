@@ -33,11 +33,12 @@ public:
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
     vision_mode_topic_(declare_parameter<std::string>("vision_mode_topic", "/vision_target_mode")),
     black_threshold_(declare_parameter<int>("black_threshold", 31)),
-    min_circle_area_(declare_parameter<double>("min_circle_area", 10340.0)),
-    min_circularity_(declare_parameter<double>("min_circularity", 0.45)),
+    min_square_area_(declare_parameter<double>(
+      "min_square_area", declare_parameter<double>("min_circle_area", 10340.0))),
+    min_square_fill_ratio_(declare_parameter<double>("min_square_fill_ratio", 0.65)),
     apriltag_dictionary_name_(declare_parameter<std::string>("apriltag_dictionary", "DICT_APRILTAG_36h11")),
     apriltag_target_id_(declare_parameter<int>("apriltag_target_id", -1)),
-    vision_target_mode_(kVisionModeBlackCircle)
+    vision_target_mode_(kVisionModeBlackSquare)
   {
     apriltag_dictionary_ = cv::aruco::getPredefinedDictionary(
       dictionaryFromName(apriltag_dictionary_name_));
@@ -71,14 +72,14 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s black_threshold=%d min_circle_area=%.1f min_circularity=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
+      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s black_threshold=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
       camera_device_.c_str(),
       show_preview_ ? "true" : "false",
       fine_data_topic_.c_str(),
       vision_mode_topic_.c_str(),
       black_threshold_,
-      min_circle_area_,
-      min_circularity_,
+      min_square_area_,
+      min_square_fill_ratio_,
       apriltag_dictionary_name_.c_str(),
       apriltag_target_id_);
   }
@@ -95,11 +96,11 @@ public:
   }
 
 private:
-  struct CircleCandidate
+  struct SquareCandidate
   {
     int contour_index{-1};
     cv::Point2f center{};
-    float radius{0.0F};
+    std::vector<cv::Point> approx{};
     double area{0.0};
     double score{0.0};
   };
@@ -148,7 +149,21 @@ private:
     fine_data_pub_->publish(fine_data_msg);
   }
 
-  void detectBlackCircleAndPublish(cv::Mat & frame)
+  static double cornerCosine(
+    const cv::Point & previous, const cv::Point & corner, const cv::Point & next)
+  {
+    const double ux = static_cast<double>(previous.x - corner.x);
+    const double uy = static_cast<double>(previous.y - corner.y);
+    const double vx = static_cast<double>(next.x - corner.x);
+    const double vy = static_cast<double>(next.y - corner.y);
+    const double denominator = std::hypot(ux, uy) * std::hypot(vx, vy);
+    if (denominator <= std::numeric_limits<double>::epsilon()) {
+      return 1.0;
+    }
+    return std::abs((ux * vx + uy * vy) / denominator);
+  }
+
+  void detectBlackSquareAndPublish(cv::Mat & frame)
   {
     cv::Mat hsv;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
@@ -177,12 +192,10 @@ private:
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
 
-    CircleCandidate best;
-    const double min_area = std::max(20.0, min_circle_area_);
-    const double min_circularity = std::max(0.20, std::min(min_circularity_, 1.0));
-    const double max_aspect_ratio = std::max(1.0, kMaxAspectRatio);
-    const double min_fill_ratio = std::max(0.05, std::min(kMinFillRatio, 1.0));
-    const double max_radial_error = std::max(0.01, kMaxRadialError);
+    SquareCandidate best;
+    const double min_area = std::max(20.0, min_square_area_);
+    const double max_aspect_ratio = std::max(1.0, kMaxSquareAspectRatio);
+    const double min_fill_ratio = std::max(0.05, std::min(min_square_fill_ratio_, 1.0));
     for (std::size_t i = 0; i < contours.size(); ++i) {
       const double area = std::abs(cv::contourArea(contours[i]));
       if (area < min_area) {
@@ -206,53 +219,46 @@ private:
         continue;
       }
 
-      const double circularity = 4.0 * CV_PI * area / (perimeter * perimeter);
       std::vector<cv::Point> approx;
       cv::approxPolyDP(contours[i], approx, 0.02 * perimeter, true);
-      if (static_cast<int>(approx.size()) < std::max(4, kMinVertices)) {
+      if (approx.size() != 4 || !cv::isContourConvex(approx)) {
         continue;
       }
 
-      cv::Point2f center;
-      float radius = 0.0F;
-      cv::minEnclosingCircle(contours[i], center, radius);
-      if (radius <= 0.0F) {
+      double max_corner_cosine = 0.0;
+      for (std::size_t corner_index = 0; corner_index < approx.size(); ++corner_index) {
+        const cv::Point & previous = approx[(corner_index + approx.size() - 1) % approx.size()];
+        const cv::Point & corner = approx[corner_index];
+        const cv::Point & next = approx[(corner_index + 1) % approx.size()];
+        max_corner_cosine = std::max(max_corner_cosine, cornerCosine(previous, corner, next));
+      }
+      if (max_corner_cosine > kMaxSquareCornerCosine) {
         continue;
       }
 
-      const double circle_area = CV_PI * static_cast<double>(radius) * static_cast<double>(radius);
-      const double fill_ratio = area / circle_area;
-      if (fill_ratio < min_fill_ratio || fill_ratio > 1.15) {
+      const double rect_area = static_cast<double>(bounds.width) * static_cast<double>(bounds.height);
+      const double fill_ratio = area / std::max(1.0, rect_area);
+      if (fill_ratio < min_fill_ratio) {
         continue;
       }
 
-      if (circularity < min_circularity && fill_ratio < 0.58) {
-        continue;
-      }
-
-      double radial_error_sum = 0.0;
-      for (const auto & point : contours[i]) {
-        const double dx = static_cast<double>(point.x) - center.x;
-        const double dy = static_cast<double>(point.y) - center.y;
-        const double distance = std::sqrt(dx * dx + dy * dy);
-        radial_error_sum += std::abs(distance - radius) / radius;
-      }
-
-      const double radial_error = radial_error_sum / static_cast<double>(contours[i].size());
-      if (radial_error > max_radial_error) {
+      const cv::Moments moments = cv::moments(contours[i]);
+      if (std::abs(moments.m00) <= std::numeric_limits<double>::epsilon()) {
         continue;
       }
 
       const double aspect_score = 1.0 / aspect_ratio;
-      const double fill_score = 1.0 - std::min(1.0, std::abs(0.85 - fill_ratio));
-      const double radial_score = 1.0 - std::min(1.0, radial_error / max_radial_error);
+      const double fill_score = std::min(1.0, fill_ratio);
+      const double corner_score = 1.0 - std::min(1.0, max_corner_cosine / kMaxSquareCornerCosine);
       const double shape_score =
-        0.35 * circularity + 0.25 * fill_score + 0.20 * aspect_score + 0.20 * radial_score;
+        0.40 * fill_score + 0.35 * aspect_score + 0.25 * corner_score;
       const double score = area * shape_score;
       if (score > best.score) {
         best.contour_index = static_cast<int>(i);
-        best.center = center;
-        best.radius = radius;
+        best.center = cv::Point2f(
+          static_cast<float>(moments.m10 / moments.m00),
+          static_cast<float>(moments.m01 / moments.m00));
+        best.approx = approx;
         best.area = area;
         best.score = score;
       }
@@ -261,34 +267,21 @@ private:
     if (best.contour_index < 0) {
       RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "No black circle found. threshold=%d contours=%zu",
+        "No black square found. threshold=%d contours=%zu",
         adaptive_threshold, contours.size());
       return;
     }
 
-    const cv::Moments moments = cv::moments(contours[static_cast<std::size_t>(best.contour_index)]);
-    if (std::abs(moments.m00) <= std::numeric_limits<double>::epsilon()) {
-      return;
-    }
-
-    const float circle_center_x = static_cast<float>(moments.m10 / moments.m00);
-    const float circle_center_y = static_cast<float>(moments.m01 / moments.m00);
-    publishFineDataFromCenter(frame, cv::Point2f(circle_center_x, circle_center_y));
+    publishFineDataFromCenter(frame, best.center);
 
     cv::drawContours(frame, contours, best.contour_index, cv::Scalar(0, 255, 0), 2);
+    std::vector<std::vector<cv::Point>> approx_contours{best.approx};
+    cv::drawContours(frame, approx_contours, 0, cv::Scalar(255, 0, 0), 2);
     cv::circle(
       frame,
       cv::Point(
         static_cast<int>(std::lround(best.center.x)),
         static_cast<int>(std::lround(best.center.y))),
-      static_cast<int>(std::lround(best.radius)),
-      cv::Scalar(255, 0, 0),
-      2);
-    cv::circle(
-      frame,
-      cv::Point(
-        static_cast<int>(std::lround(circle_center_x)),
-        static_cast<int>(std::lround(circle_center_y))),
       4,
       cv::Scalar(0, 0, 255),
       cv::FILLED);
@@ -371,8 +364,8 @@ private:
       }
     }
 
-    if (vision_target_mode_ == kVisionModeBlackCircle) {
-      detectBlackCircleAndPublish(frame);
+    if (vision_target_mode_ == kVisionModeBlackSquare) {
+      detectBlackSquareAndPublish(frame);
     } else if (vision_target_mode_ == kVisionModeAprilTag) {
       detectAprilTagAndPublish(frame);
     }
@@ -392,8 +385,8 @@ private:
   std::string fine_data_topic_;
   std::string vision_mode_topic_;
   int black_threshold_;
-  double min_circle_area_;
-  double min_circularity_;
+  double min_square_area_;
+  double min_square_fill_ratio_;
   std::string apriltag_dictionary_name_;
   int apriltag_target_id_;
   uint8_t vision_target_mode_;
@@ -407,12 +400,10 @@ private:
   cv::Ptr<cv::aruco::DetectorParameters> apriltag_parameters_;
 
   static constexpr uint8_t kVisionModeIdle = 0;
-  static constexpr uint8_t kVisionModeBlackCircle = 1;
+  static constexpr uint8_t kVisionModeBlackSquare = 1;
   static constexpr uint8_t kVisionModeAprilTag = 2;
-  static constexpr double kMaxAspectRatio = 1.30;
-  static constexpr double kMinFillRatio = 0.70;
-  static constexpr int kMinVertices = 8;
-  static constexpr double kMaxRadialError = 0.12;
+  static constexpr double kMaxSquareAspectRatio = 1.25;
+  static constexpr double kMaxSquareCornerCosine = 0.35;
   static constexpr bool kUseOtsu = true;
 };
 

@@ -39,7 +39,7 @@ enum class TaskPhase
   PickupDescending,  // 抓取：magnet=01 + servo=01 已发，视觉微调 XY 并下降到抓取高度
   PickupHolding,     // 抓取：在抓取高度悬停一段时间，让磁铁吸住货物
   PickupAscending,   // 抓取：servo=00 已发，上升回 50cm（电磁铁仍通电吸住货物）
-  PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑圆来判定成败
+  PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑色正方形片来判定成败
   DropArriving,      // 投放：飞到 (x,y,40cm)
   DropAligning,      // 投放：在 40cm 使用 AprilTag 视觉对准
   DropDescending,    // 投放：AprilTag 对准后下降到投放高度
@@ -127,7 +127,7 @@ private:
   double pickup_check_observe_sec_;        // 判断高度观察窗口（默认 2.0s）
   double pickup_observe_sec_;              // 兼容旧参数；当前判断窗口由 pickup_check_observe_sec 控制
   int pickup_max_attempts_;                // 抓取最大重试次数（默认 3）
-  double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑圆消失"（默认 1.0s）
+  double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑色正方形片消失"（默认 1.0s）
 
   // 投放参数（独立时序，不受抓取参数影响）
   double drop_altitude_cm_;                // 投放释放高度
@@ -157,7 +157,7 @@ private:
   bool magnet_sent_in_phase_;              // 当前 *Acting 阶段是否已经发过电磁铁帧
 
   // 抓取对准成功时记录的实际位置（用于下降/悬停/上升锁位 + 重试回位）
-  // 因为黑圆实物可能不完全在航点 xy，对准后用真实位置代替航点坐标
+  // 因为黑色正方形片实物可能不完全在航点 xy，对准后用真实位置代替航点坐标
   double aligned_x_cm_;
   double aligned_y_cm_;
   bool has_aligned_position_;

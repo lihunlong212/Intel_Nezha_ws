@@ -14,8 +14,8 @@ WINDOW_NAME = "drone_camera_preview"
 FINE_DATA_TOPIC = "/fine_data"
 VISION_MODE_TOPIC = "/vision_target_mode"
 BLACK_THRESHOLD = "50"
-MIN_CIRCLE_AREA = "100.0"
-MIN_CIRCULARITY = "0.45"
+MIN_SQUARE_AREA = "100.0"
+MIN_SQUARE_FILL_RATIO = "0.65"
 APRILTAG_DICTIONARY = "DICT_APRILTAG_36h11"
 APRILTAG_TARGET_ID = "-1"
 
@@ -30,8 +30,8 @@ def generate_launch_description():
     fine_data_topic = LaunchConfiguration("fine_data_topic")
     vision_mode_topic = LaunchConfiguration("vision_mode_topic")
     black_threshold = LaunchConfiguration("black_threshold")
-    min_circle_area = LaunchConfiguration("min_circle_area")
-    min_circularity = LaunchConfiguration("min_circularity")
+    min_square_area = LaunchConfiguration("min_square_area")
+    min_square_fill_ratio = LaunchConfiguration("min_square_fill_ratio")
     apriltag_dictionary = LaunchConfiguration("apriltag_dictionary")
     apriltag_target_id = LaunchConfiguration("apriltag_target_id")
 
@@ -75,7 +75,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "vision_mode_topic",
                 default_value=VISION_MODE_TOPIC,
-                description="Topic for switching vision target mode: 0 idle, 1 black circle, 2 AprilTag.",
+                description="Topic for switching vision target mode: 0 idle, 1 black square, 2 AprilTag.",
             ),
             DeclareLaunchArgument(
                 "black_threshold",
@@ -83,14 +83,14 @@ def generate_launch_description():
                 description="Gray threshold for black target segmentation. Larger values detect lighter dark objects.",
             ),
             DeclareLaunchArgument(
-                "min_circle_area",
-                default_value=MIN_CIRCLE_AREA,
-                description="Minimum contour area for the black circle target.",
+                "min_square_area",
+                default_value=MIN_SQUARE_AREA,
+                description="Minimum contour area for the black square target.",
             ),
             DeclareLaunchArgument(
-                "min_circularity",
-                default_value=MIN_CIRCULARITY,
-                description="Minimum circularity, where 1.0 is a perfect circle.",
+                "min_square_fill_ratio",
+                default_value=MIN_SQUARE_FILL_RATIO,
+                description="Minimum contour area / bounding rectangle area ratio for the black square target.",
             ),
             DeclareLaunchArgument(
                 "apriltag_dictionary",
@@ -118,8 +118,10 @@ def generate_launch_description():
                         "fine_data_topic": fine_data_topic,
                         "vision_mode_topic": vision_mode_topic,
                         "black_threshold": ParameterValue(black_threshold, value_type=int),
-                        "min_circle_area": ParameterValue(min_circle_area, value_type=float),
-                        "min_circularity": ParameterValue(min_circularity, value_type=float),
+                        "min_square_area": ParameterValue(min_square_area, value_type=float),
+                        "min_square_fill_ratio": ParameterValue(
+                            min_square_fill_ratio, value_type=float
+                        ),
                         "apriltag_dictionary": apriltag_dictionary,
                         "apriltag_target_id": ParameterValue(apriltag_target_id, value_type=int),
                     }
