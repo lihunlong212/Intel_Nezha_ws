@@ -42,6 +42,7 @@ enum class TaskPhase
   PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑圆来判定成败
   DropArriving,      // 投放：飞到 (x,y,40cm)
   DropAligning,      // 投放：在 40cm 使用 AprilTag 视觉对准
+  DropDescending,    // 投放：AprilTag 对准后下降到投放高度
   DropActing         // 投放：servo=01 已发，2s 内发 magnet=00 释放，结束发 servo=00
 };
 
@@ -67,6 +68,7 @@ private:
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
   void advanceToNextTarget();
+  void startDropFailureReturn(const rclcpp::Time & now_time, double landing_yaw_deg);
   void publishVisualTakeoverState(bool active);
   void publishVisionTargetMode(uint8_t mode);
   void publishServoControl(uint8_t state);
@@ -128,8 +130,8 @@ private:
   double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑圆消失"（默认 1.0s）
 
   // 投放参数（独立时序，不受抓取参数影响）
-  double drop_altitude_cm_;                // 兼容旧参数；当前投放高度由 drop_align_altitude_cm 控制
-  double drop_align_altitude_cm_;          // 投放 AprilTag 对准高度（默认 40cm）
+  double drop_altitude_cm_;                // 投放释放高度
+  double drop_align_altitude_cm_;          // 投放 AprilTag 对准高度
   double drop_servo_down_duration_sec_;    // 投放时舵机下放总时长（默认 2.0s）
   double drop_magnet_off_delay_sec_;       // 投放时舵机下放后多久断开电磁铁（默认 1.0s）
 
@@ -142,6 +144,7 @@ private:
   rclcpp::Time last_fine_data_time_;
 
   bool mission_complete_sent_;
+  bool drop_failure_return_active_;
 
   int aligned_frame_count_;
   rclcpp::Time visual_takeover_start_time_;

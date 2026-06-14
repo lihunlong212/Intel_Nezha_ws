@@ -35,6 +35,7 @@ const char * phaseToString(TaskPhase phase)
     case TaskPhase::PickupObserving: return "PickupObserving";
     case TaskPhase::DropArriving: return "DropArriving";
     case TaskPhase::DropAligning: return "DropAligning";
+    case TaskPhase::DropDescending: return "DropDescending";
     case TaskPhase::DropActing: return "DropActing";
   }
   return "?";
@@ -68,6 +69,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   fine_error_x_px_(0),
   fine_error_y_px_(0),
   mission_complete_sent_(false),
+  drop_failure_return_active_(false),
   aligned_frame_count_(0),
   phase_(TaskPhase::Idle),
   pickup_attempts_(0),
@@ -188,6 +190,7 @@ void RouteTargetPublisherNode::addTarget(const Target & target)
   targets_.push_back(target);
   if (was_empty || was_completed) {
     mission_complete_sent_ = false;
+    drop_failure_return_active_ = false;
     current_idx_ = was_completed ? targets_.size() - 1 : 0;
     publishCurrent();
   }
@@ -278,8 +281,11 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       break;
     case TaskPhase::DropArriving:
     case TaskPhase::DropAligning:
-    case TaskPhase::DropActing:
       published_target.z_cm = drop_align_altitude_cm_;
+      break;
+    case TaskPhase::DropDescending:
+    case TaskPhase::DropActing:
+      published_target.z_cm = drop_altitude_cm_;
       break;
     case TaskPhase::Idle:
     default:
@@ -393,6 +399,13 @@ void RouteTargetPublisherNode::advanceToNextTarget()
     publishCurrent();
   } else {
     current_idx_ = targets_.size();
+    if (drop_failure_return_active_ && drop_failed_pub_) {
+      std_msgs::msg::Empty drop_failed_msg;
+      drop_failed_pub_->publish(drop_failed_msg);
+      drop_failure_return_active_ = false;
+      mission_complete_sent_ = true;
+      RCLCPP_WARN(get_logger(), "Drop failed return-and-land completed. Published /drop_failed.");
+    }
     if (!mission_complete_sent_ && mission_complete_pub_) {
       std_msgs::msg::Empty mission_complete_msg;
       mission_complete_pub_->publish(mission_complete_msg);
@@ -403,6 +416,48 @@ void RouteTargetPublisherNode::advanceToNextTarget()
     active_controller_pub_->publish(active_msg);
     RCLCPP_INFO(get_logger(), "All targets completed.");
   }
+}
+
+void RouteTargetPublisherNode::startDropFailureReturn(
+  const rclcpp::Time & now_time,
+  double landing_yaw_deg)
+{
+  publishServoControl(0x00);
+  has_aligned_position_ = false;
+  drop_failure_return_active_ = true;
+  mission_complete_sent_ = false;
+
+  const double return_altitude_cm = std::max(
+    drop_align_altitude_cm_,
+    targets_.empty() ? drop_align_altitude_cm_ : targets_.front().z_cm);
+
+  targets_.resize(current_idx_ + 1);
+  targets_.push_back(Target{0.0, 0.0, return_altitude_cm, landing_yaw_deg, 1});
+  targets_.push_back(Target{0.0, 0.0, 0.0, landing_yaw_deg, 1});
+
+  RCLCPP_WARN(
+    get_logger(),
+    "Drop failed. Returning to home: (0.0, 0.0, %.1fcm), then landing at (0.0, 0.0, 0.0).",
+    return_altitude_cm);
+
+  if (phase_ != TaskPhase::Idle) {
+    RCLCPP_INFO(get_logger(), "Phase: %s -> Idle (drop failure return)", phaseToString(phase_));
+  }
+  phase_ = TaskPhase::Idle;
+  phase_start_time_ = now_time;
+  magnet_sent_in_phase_ = false;
+  aligned_frame_count_ = 0;
+  has_fine_data_ = false;
+  fine_error_x_px_ = 0;
+  fine_error_y_px_ = 0;
+  last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+  if (visual_takeover_active_) {
+    visual_takeover_active_ = false;
+    publishVisualTakeoverState(false);
+  }
+  publishVisionTargetMode(kVisionModeIdle);
+
+  advanceToNextTarget();
 }
 
 void RouteTargetPublisherNode::publishVisualTakeoverState(bool active)
@@ -773,16 +828,9 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (phase_elapsed > visual_takeover_timeout_sec_) {
         RCLCPP_ERROR(
           get_logger(),
-          "Drop alignment timed out for target %zu after %.1fs. Failing without magnet release.",
+          "Drop alignment timed out for target %zu after %.1fs. Returning home without magnet release.",
           current_idx_, phase_elapsed);
-        publishServoControl(0x00);
-        if (drop_failed_pub_) {
-          std_msgs::msg::Empty empty_msg;
-          drop_failed_pub_->publish(empty_msg);
-        }
-        setPhase(TaskPhase::Idle, now_time);
-        current_idx_ = targets_.size();
-        mission_complete_sent_ = true;
+        startDropFailureReturn(now_time, yaw_deg);
         return;
       }
 
@@ -814,13 +862,34 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         if (aligned_frame_count_ >= visual_align_required_frames_) {
           RCLCPP_INFO(
             get_logger(),
-            "Drop alignment locked at 40cm for target %zu. Starting release action.",
-            current_idx_);
-          publishServoControl(0x01);
-          setPhase(TaskPhase::DropActing, now_time);
+            "Drop alignment locked at %.1fcm for target %zu. Descending to %.1fcm for release.",
+            drop_align_altitude_cm_, current_idx_, drop_altitude_cm_);
+          setPhase(TaskPhase::DropDescending, now_time);
         }
       } else {
         aligned_frame_count_ = 0;
+      }
+      return;
+    }
+
+    case TaskPhase::DropDescending: {
+      if (phase_elapsed > visual_takeover_timeout_sec_) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "Drop descent timed out for target %zu after %.1fs. Returning home without magnet release.",
+          current_idx_, phase_elapsed);
+        startDropFailureReturn(now_time, yaw_deg);
+        return;
+      }
+
+      const double height_error_cm = drop_altitude_cm_ - z_cm;
+      RCLCPP_DEBUG_THROTTLE(
+        get_logger(), *get_clock(), 500,
+        "DropDescending %zu: z=%.1fcm target=%.1fcm err=%.1fcm",
+        current_idx_, z_cm, drop_altitude_cm_, height_error_cm);
+      if (std::fabs(height_error_cm) <= height_tol_cm_) {
+        publishServoControl(0x01);
+        setPhase(TaskPhase::DropActing, now_time);
       }
       return;
     }
