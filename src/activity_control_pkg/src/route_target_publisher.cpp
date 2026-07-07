@@ -5,6 +5,8 @@
 #include <chrono>
 #include <clocale>
 #include <cmath>
+#include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <limits>
 
@@ -23,6 +25,12 @@ constexpr double kDefaultTimerPeriodSec = 0.05;
 constexpr uint8_t kVisionModeIdle = 0;
 constexpr uint8_t kVisionModeBlackSquare = 1;
 constexpr uint8_t kVisionModeAprilTag = 2;
+constexpr int kTargetTypeWaypoint = 1;
+constexpr int kTargetTypePickup = 2;
+constexpr int kTargetTypeDrop = 3;
+constexpr int kTargetTypeSearch = 4;
+constexpr double kPostPickupAltitudeCm = 120.0;
+constexpr double kLandingAltitudeCm = 15.0;
 
 const char * phaseToString(TaskPhase phase)
 {
@@ -212,6 +220,7 @@ void RouteTargetPublisherNode::publishCurrent()
 {
   if (current_idx_ != std::numeric_limits<std::size_t>::max() && current_idx_ < targets_.size()) {
     publishTarget(getPublishedTarget(targets_[current_idx_]), current_idx_ == 0);
+    publishIdleVisionModeForCurrentTarget();
   }
 }
 
@@ -391,6 +400,9 @@ void RouteTargetPublisherNode::advanceToNextTarget()
   const std::size_t previous_idx = current_idx_;
   ++current_idx_;
   if (current_idx_ < targets_.size()) {
+    if (targets_[current_idx_].type == kTargetTypeSearch) {
+      resetFineDataState();
+    }
     RCLCPP_INFO(
       get_logger(),
       "Advance target: %zu -> %zu",
@@ -432,8 +444,9 @@ void RouteTargetPublisherNode::startDropFailureReturn(
     targets_.empty() ? drop_align_altitude_cm_ : targets_.front().z_cm);
 
   targets_.resize(current_idx_ + 1);
-  targets_.push_back(Target{0.0, 0.0, return_altitude_cm, landing_yaw_deg, 1});
-  targets_.push_back(Target{0.0, 0.0, 0.0, landing_yaw_deg, 1});
+  targets_.push_back(
+    Target{0.0, 0.0, return_altitude_cm, landing_yaw_deg, kTargetTypeWaypoint});
+  targets_.push_back(Target{0.0, 0.0, 0.0, landing_yaw_deg, kTargetTypeWaypoint});
 
   RCLCPP_WARN(
     get_logger(),
@@ -447,10 +460,7 @@ void RouteTargetPublisherNode::startDropFailureReturn(
   phase_start_time_ = now_time;
   magnet_sent_in_phase_ = false;
   aligned_frame_count_ = 0;
-  has_fine_data_ = false;
-  fine_error_x_px_ = 0;
-  fine_error_y_px_ = 0;
-  last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+  resetFineDataState();
   if (visual_takeover_active_) {
     visual_takeover_active_ = false;
     publishVisualTakeoverState(false);
@@ -458,6 +468,107 @@ void RouteTargetPublisherNode::startDropFailureReturn(
   publishVisionTargetMode(kVisionModeIdle);
 
   advanceToNextTarget();
+}
+
+void RouteTargetPublisherNode::startSearchFailureReturn(const rclcpp::Time & now_time)
+{
+  targets_.resize(current_idx_ + 1);
+  targets_.push_back(Target{0.0, 0.0, kPostPickupAltitudeCm, 0.0, kTargetTypeWaypoint});
+  targets_.push_back(Target{0.0, 0.0, kLandingAltitudeCm, 0.0, kTargetTypeWaypoint});
+
+  resetFineDataState();
+  publishVisionTargetMode(kVisionModeIdle);
+  if (visual_takeover_active_) {
+    visual_takeover_active_ = false;
+    publishVisualTakeoverState(false);
+  }
+
+  phase_ = TaskPhase::Idle;
+  phase_start_time_ = now_time;
+  has_aligned_position_ = false;
+  magnet_sent_in_phase_ = false;
+
+  RCLCPP_WARN(
+    get_logger(),
+    "Search completed without target detection. Returning via (0.0, 0.0, %.1fcm), then landing at %.1fcm.",
+    kPostPickupAltitudeCm, kLandingAltitudeCm);
+
+  advanceToNextTarget();
+}
+
+void RouteTargetPublisherNode::insertPostPickupClimbTarget(
+  double x_cm,
+  double y_cm,
+  double yaw_deg)
+{
+  const auto insert_pos = targets_.begin() + static_cast<std::ptrdiff_t>(current_idx_ + 1);
+  targets_.insert(
+    insert_pos,
+    Target{x_cm, y_cm, kPostPickupAltitudeCm, yaw_deg, kTargetTypeWaypoint});
+  RCLCPP_INFO(
+    get_logger(),
+    "Inserted post-pickup climb target at (%.1f, %.1f, %.1f, %.1f).",
+    x_cm, y_cm, kPostPickupAltitudeCm, yaw_deg);
+}
+
+void RouteTargetPublisherNode::removePendingSearchTargetsAfterCurrent()
+{
+  if (current_idx_ + 1 >= targets_.size()) {
+    return;
+  }
+
+  auto first = targets_.begin() + static_cast<std::ptrdiff_t>(current_idx_ + 1);
+  const auto old_size = targets_.size();
+  targets_.erase(
+    std::remove_if(
+      first,
+      targets_.end(),
+      [](const Target & target) {
+        return target.type == kTargetTypeSearch;
+      }),
+    targets_.end());
+
+  const auto removed = old_size - targets_.size();
+  if (removed > 0) {
+    RCLCPP_INFO(get_logger(), "Removed %zu pending search target(s).", removed);
+  }
+}
+
+bool RouteTargetPublisherNode::hasPendingSearchTargetsAfterCurrent() const
+{
+  if (current_idx_ + 1 >= targets_.size()) {
+    return false;
+  }
+
+  return std::any_of(
+    targets_.begin() + static_cast<std::ptrdiff_t>(current_idx_ + 1),
+    targets_.end(),
+    [](const Target & target) {
+      return target.type == kTargetTypeSearch;
+    });
+}
+
+void RouteTargetPublisherNode::resetFineDataState()
+{
+  has_fine_data_ = false;
+  pickup_observed_fine_data_ = false;
+  fine_error_x_px_ = 0;
+  fine_error_y_px_ = 0;
+  last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+}
+
+void RouteTargetPublisherNode::publishIdleVisionModeForCurrentTarget()
+{
+  if (phase_ != TaskPhase::Idle ||
+    current_idx_ == std::numeric_limits<std::size_t>::max() ||
+    current_idx_ >= targets_.size())
+  {
+    return;
+  }
+
+  publishVisionTargetMode(
+    targets_[current_idx_].type == kTargetTypeSearch ?
+    kVisionModeBlackSquare : kVisionModeIdle);
 }
 
 void RouteTargetPublisherNode::publishVisualTakeoverState(bool active)
@@ -527,18 +638,11 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   if (phase == TaskPhase::PickupAligning || phase == TaskPhase::DropAligning) {
     aligned_frame_count_ = 0;
     visual_takeover_start_time_ = now_time;
-    has_fine_data_ = false;
-    fine_error_x_px_ = 0;
-    fine_error_y_px_ = 0;
-    last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    resetFineDataState();
   }
 
   if (phase == TaskPhase::PickupObserving) {
-    pickup_observed_fine_data_ = false;
-    has_fine_data_ = false;
-    fine_error_x_px_ = 0;
-    fine_error_y_px_ = 0;
-    last_fine_data_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    resetFineDataState();
   }
 
   // 下发新阶段对应的目标位置（z 由 getPublishedTarget 调整）
@@ -587,6 +691,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         "Republishing current target %zu as /target_position heartbeat.",
         current_idx_);
       publishTarget(getPublishedTarget(targets_[current_idx_]), false);
+      publishIdleVisionModeForCurrentTarget();
       last_target_republish_time_ = now_time;
     }
   }
@@ -604,11 +709,28 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
   switch (phase_) {
     case TaskPhase::Idle: {
+      if (target.type == kTargetTypeSearch) {
+        publishVisionTargetMode(kVisionModeBlackSquare);
+        if (hasFreshFineData(now_time)) {
+          RCLCPP_INFO(
+            get_logger(),
+            "Detected search target from /fine_data at route target %zu. Switching to pickup.",
+            current_idx_);
+          targets_[current_idx_].type = kTargetTypePickup;
+          removePendingSearchTargetsAfterCurrent();
+          pickup_attempts_ = 0;
+          has_aligned_position_ = false;
+          setPhase(TaskPhase::PickupAligning, now_time);
+          return;
+        }
+      }
+
       const double dx_now = target.x_cm - x_cm;
       const double dy_now = target.y_cm - y_cm;
       const double dxy_now = std::hypot(dx_now, dy_now);
       const double dz_now = target.z_cm - z_cm;
-      const bool is_task_target = target.type == 2 || target.type == 3;
+      const bool is_task_target =
+        target.type == kTargetTypePickup || target.type == kTargetTypeDrop;
       const bool reached = is_task_target
         ? dxy_now <= pos_tol_cm_
         : isReached(target, x_cm, y_cm, z_cm, yaw_deg);
@@ -636,13 +758,19 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         "Target %zu reached: pos_err=(%.1f, %.1f, %.1f)cm yaw_err=%.1fdeg type=%d",
         current_idx_, dx, dy, dz, dyaw, target.type);
 
-      if (target.type == 2) {
+      if (target.type == kTargetTypePickup) {
         pickup_attempts_ = 0;
         // 进入新抓取航点：清掉上一个抓取留下的对准位置
         has_aligned_position_ = false;
         setPhase(TaskPhase::PickupAligning, now_time);
-      } else if (target.type == 3) {
+      } else if (target.type == kTargetTypeDrop) {
         setPhase(TaskPhase::DropAligning, now_time);
+      } else if (target.type == kTargetTypeSearch) {
+        if (hasPendingSearchTargetsAfterCurrent()) {
+          advanceToNextTarget();
+        } else {
+          startSearchFailureReturn(now_time);
+        }
       } else {
         advanceToNextTarget();
       }
@@ -765,6 +893,10 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           get_logger(),
           "Pickup SUCCESS at target %zu (attempt %d/%d). Advancing.",
           current_idx_, pickup_attempts_ + 1, pickup_max_attempts_);
+        const double climb_x_cm = has_aligned_position_ ? aligned_x_cm_ : x_cm;
+        const double climb_y_cm = has_aligned_position_ ? aligned_y_cm_ : y_cm;
+        const double climb_yaw_deg = target.yaw_deg;
+        insertPostPickupClimbTarget(climb_x_cm, climb_y_cm, climb_yaw_deg);
         // 通知 action server：抓取完成，进入送货阶段
         if (pickup_done_pub_) {
           std_msgs::msg::Empty empty_msg;
@@ -962,13 +1094,25 @@ RouteTestNode::RouteTestNode(
 
 std::vector<Target> RouteTestNode::buildRoute() const
 {
-  // 航点 type: 1=普通  2=抓取  3=投放
   return std::vector<Target>{
-    Target{0.0,   0.0,   110.0, 0.0, 1},   // 起飞 / 巡航高度
-    Target{20.0, 100.0, 110.0, 0.0, 2},   // 抓取
-    Target{125.0, 100.0,   110.0, 0.0, 3},   // 投放（坐标按需调整）
-    Target{0.0, 0.0,   110.0, 0.0, 1},
-    Target{0.0,   0.0,   0.0,   10.0, 1},   // 落地
+    Target{0.0, 0.0, 80.0, 0.0, kTargetTypeWaypoint},
+    Target{-32.0, 65.0, 80.0, 0.0, kTargetTypeSearch},
+    Target{-32.0, 182.0, 80.0, 0.0, kTargetTypeSearch},
+    Target{0.0, 182.0, 80.0, 0.0, kTargetTypeSearch},
+    Target{0.0, 65.0, 80.0, 0.0, kTargetTypeSearch},
+    Target{35.0, 65.0, 80.0, 0.0, kTargetTypeSearch},
+    Target{35.0, 182.0, 80.0, 0.0, kTargetTypeSearch},
+
+
+    Target{30.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
+    Target{130.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
+
+    Target{193.0, 52.0, 120.0, 0.0, kTargetTypePickup},
+    
+    Target{130.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
+    Target{30.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
+    Target{0.0, 0.0, 120.0, 0.0, kTargetTypeWaypoint},
+    Target{0.0, 0.0, kLandingAltitudeCm, 0.0, kTargetTypeWaypoint},
   };
 }
 

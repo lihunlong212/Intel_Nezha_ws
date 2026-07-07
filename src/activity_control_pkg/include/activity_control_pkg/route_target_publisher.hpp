@@ -69,6 +69,12 @@ private:
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
   void advanceToNextTarget();
   void startDropFailureReturn(const rclcpp::Time & now_time, double landing_yaw_deg);
+  void startSearchFailureReturn(const rclcpp::Time & now_time);
+  void insertPostPickupClimbTarget(double x_cm, double y_cm, double yaw_deg);
+  void removePendingSearchTargetsAfterCurrent();
+  bool hasPendingSearchTargetsAfterCurrent() const;
+  void resetFineDataState();
+  void publishIdleVisionModeForCurrentTarget();
   void publishVisualTakeoverState(bool active);
   void publishVisionTargetMode(uint8_t mode);
   void publishServoControl(uint8_t state);
