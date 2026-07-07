@@ -32,10 +32,13 @@ public:
     window_name_(declare_parameter<std::string>("window_name", "drone_camera_preview")),
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
     vision_mode_topic_(declare_parameter<std::string>("vision_mode_topic", "/vision_target_mode")),
-    black_threshold_(declare_parameter<int>("black_threshold", 31)),
+    blue_hue_min_(declare_parameter<int>("blue_hue_min", 58)),
+    blue_hue_max_(declare_parameter<int>("blue_hue_max", 111)),
+    blue_saturation_min_(declare_parameter<int>("blue_saturation_min", 49)),
+    blue_value_min_(declare_parameter<int>("blue_value_min", 75)),
     min_square_area_(declare_parameter<double>(
-      "min_square_area", declare_parameter<double>("min_circle_area", 10340.0))),
-    min_square_fill_ratio_(declare_parameter<double>("min_square_fill_ratio", 0.65)),
+      "min_square_area", declare_parameter<double>("min_circle_area", 340.0))),
+    min_square_fill_ratio_(declare_parameter<double>("min_square_fill_ratio", 0.22)),
     apriltag_dictionary_name_(declare_parameter<std::string>("apriltag_dictionary", "DICT_APRILTAG_36h11")),
     apriltag_target_id_(declare_parameter<int>("apriltag_target_id", -1)),
     vision_target_mode_(kVisionModeBlackSquare)
@@ -72,12 +75,15 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s black_threshold=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
+      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s blue_hsv=[%d,%d] s_min=%d v_min=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
       camera_device_.c_str(),
       show_preview_ ? "true" : "false",
       fine_data_topic_.c_str(),
       vision_mode_topic_.c_str(),
-      black_threshold_,
+      blue_hue_min_,
+      blue_hue_max_,
+      blue_saturation_min_,
+      blue_value_min_,
       min_square_area_,
       min_square_fill_ratio_,
       apriltag_dictionary_name_.c_str(),
@@ -163,26 +169,22 @@ private:
     return std::abs((ux * vx + uy * vy) / denominator);
   }
 
-  void detectBlackSquareAndPublish(cv::Mat & frame)
+  void detectBlueSquareAndPublish(cv::Mat & frame)
   {
     cv::Mat hsv;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
 
-    std::vector<cv::Mat> hsv_channels;
-    cv::split(hsv, hsv_channels);
-
-    cv::Mat value = hsv_channels[2];
-    cv::GaussianBlur(value, value, cv::Size(5, 5), 0.0);
-
+    cv::GaussianBlur(hsv, hsv, cv::Size(5, 5), 0.0);
     cv::Mat mask;
-    cv::Mat otsu_mask;
-    const int fixed_threshold = std::max(0, std::min(black_threshold_, 255));
-    const double otsu_threshold =
-      cv::threshold(value, otsu_mask, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
-    const int adaptive_threshold = kUseOtsu ?
-      std::max(fixed_threshold, std::min(160, static_cast<int>(std::lround(otsu_threshold)))) :
-      fixed_threshold;
-    cv::threshold(value, mask, adaptive_threshold, 255, cv::THRESH_BINARY_INV);
+    const int hue_min = std::max(0, std::min(blue_hue_min_, 179));
+    const int hue_max = std::max(0, std::min(blue_hue_max_, 179));
+    const int saturation_min = std::max(0, std::min(blue_saturation_min_, 255));
+    const int value_min = std::max(0, std::min(blue_value_min_, 255));
+    cv::inRange(
+      hsv,
+      cv::Scalar(hue_min, saturation_min, value_min),
+      cv::Scalar(hue_max, 255, 255),
+      mask);
 
     const cv::Mat close_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
     const cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
@@ -267,8 +269,8 @@ private:
     if (best.contour_index < 0) {
       RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "No black square found. threshold=%d contours=%zu",
-        adaptive_threshold, contours.size());
+        "No blue square found. hue=[%d,%d] s_min=%d v_min=%d contours=%zu",
+        hue_min, hue_max, saturation_min, value_min, contours.size());
       return;
     }
 
@@ -365,7 +367,7 @@ private:
     }
 
     if (vision_target_mode_ == kVisionModeBlackSquare) {
-      detectBlackSquareAndPublish(frame);
+      detectBlueSquareAndPublish(frame);
     } else if (vision_target_mode_ == kVisionModeAprilTag) {
       detectAprilTagAndPublish(frame);
     }
@@ -384,7 +386,10 @@ private:
   std::string window_name_;
   std::string fine_data_topic_;
   std::string vision_mode_topic_;
-  int black_threshold_;
+  int blue_hue_min_;
+  int blue_hue_max_;
+  int blue_saturation_min_;
+  int blue_value_min_;
   double min_square_area_;
   double min_square_fill_ratio_;
   std::string apriltag_dictionary_name_;
@@ -404,7 +409,6 @@ private:
   static constexpr uint8_t kVisionModeAprilTag = 2;
   static constexpr double kMaxSquareAspectRatio = 1.25;
   static constexpr double kMaxSquareCornerCosine = 0.35;
-  static constexpr bool kUseOtsu = true;
 };
 
 int main(int argc, char * argv[])

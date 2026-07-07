@@ -35,6 +35,7 @@ struct Target
 enum class TaskPhase
 {
   Idle,              // 普通巡航 / 任务航点未开始
+  SearchApproaching, // 搜索：保持当前高度，用视觉 XY 粗靠近目标
   PickupAligning,    // 抓取：在 50cm 视觉对准（高度 + XY）
   PickupDescending,  // 抓取：magnet=01 + servo=01 已发，视觉微调 XY 并下降到抓取高度
   PickupHolding,     // 抓取：在抓取高度悬停一段时间，让磁铁吸住货物
@@ -70,6 +71,7 @@ private:
   void advanceToNextTarget();
   void startDropFailureReturn(const rclcpp::Time & now_time, double landing_yaw_deg);
   void startSearchFailureReturn(const rclcpp::Time & now_time);
+  void startPickupFailureReturn(const rclcpp::Time & now_time);
   void insertPostPickupClimbTarget(double x_cm, double y_cm, double yaw_deg);
   void removePendingSearchTargetsAfterCurrent();
   bool hasPendingSearchTargetsAfterCurrent() const;
@@ -155,6 +157,7 @@ private:
   int aligned_frame_count_;
   rclcpp::Time visual_takeover_start_time_;
   rclcpp::Time last_target_republish_time_;
+  double search_approach_altitude_cm_;
 
   // 抓取/投放子状态机
   TaskPhase phase_;

@@ -13,9 +13,12 @@ SHOW_PREVIEW = "false"
 WINDOW_NAME = "drone_camera_preview"
 FINE_DATA_TOPIC = "/fine_data"
 VISION_MODE_TOPIC = "/vision_target_mode"
-BLACK_THRESHOLD = "50"
-MIN_SQUARE_AREA = "100.0"
-MIN_SQUARE_FILL_RATIO = "0.65"
+BLUE_HUE_MIN = "58"
+BLUE_HUE_MAX = "111"
+BLUE_SATURATION_MIN = "49"
+BLUE_VALUE_MIN = "75"
+MIN_SQUARE_AREA = "340.0"
+MIN_SQUARE_FILL_RATIO = "0.22"
 APRILTAG_DICTIONARY = "DICT_APRILTAG_36h11"
 APRILTAG_TARGET_ID = "-1"
 
@@ -29,7 +32,10 @@ def generate_launch_description():
     window_name = LaunchConfiguration("window_name")
     fine_data_topic = LaunchConfiguration("fine_data_topic")
     vision_mode_topic = LaunchConfiguration("vision_mode_topic")
-    black_threshold = LaunchConfiguration("black_threshold")
+    blue_hue_min = LaunchConfiguration("blue_hue_min")
+    blue_hue_max = LaunchConfiguration("blue_hue_max")
+    blue_saturation_min = LaunchConfiguration("blue_saturation_min")
+    blue_value_min = LaunchConfiguration("blue_value_min")
     min_square_area = LaunchConfiguration("min_square_area")
     min_square_fill_ratio = LaunchConfiguration("min_square_fill_ratio")
     apriltag_dictionary = LaunchConfiguration("apriltag_dictionary")
@@ -75,22 +81,37 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "vision_mode_topic",
                 default_value=VISION_MODE_TOPIC,
-                description="Topic for switching vision target mode: 0 idle, 1 black square, 2 AprilTag.",
+                description="Topic for switching vision target mode: 0 idle, 1 blue square, 2 AprilTag.",
             ),
             DeclareLaunchArgument(
-                "black_threshold",
-                default_value=BLACK_THRESHOLD,
-                description="Gray threshold for black target segmentation. Larger values detect lighter dark objects.",
+                "blue_hue_min",
+                default_value=BLUE_HUE_MIN,
+                description="Minimum OpenCV HSV hue for the light-blue square target.",
+            ),
+            DeclareLaunchArgument(
+                "blue_hue_max",
+                default_value=BLUE_HUE_MAX,
+                description="Maximum OpenCV HSV hue for the light-blue square target.",
+            ),
+            DeclareLaunchArgument(
+                "blue_saturation_min",
+                default_value=BLUE_SATURATION_MIN,
+                description="Minimum HSV saturation for the light-blue square target.",
+            ),
+            DeclareLaunchArgument(
+                "blue_value_min",
+                default_value=BLUE_VALUE_MIN,
+                description="Minimum HSV value/brightness for the light-blue square target.",
             ),
             DeclareLaunchArgument(
                 "min_square_area",
                 default_value=MIN_SQUARE_AREA,
-                description="Minimum contour area for the black square target.",
+                description="Minimum contour area for the blue square target.",
             ),
             DeclareLaunchArgument(
                 "min_square_fill_ratio",
                 default_value=MIN_SQUARE_FILL_RATIO,
-                description="Minimum contour area / bounding rectangle area ratio for the black square target.",
+                description="Minimum contour area / bounding rectangle area ratio for the blue square target.",
             ),
             DeclareLaunchArgument(
                 "apriltag_dictionary",
@@ -117,7 +138,12 @@ def generate_launch_description():
                         "window_name": window_name,
                         "fine_data_topic": fine_data_topic,
                         "vision_mode_topic": vision_mode_topic,
-                        "black_threshold": ParameterValue(black_threshold, value_type=int),
+                        "blue_hue_min": ParameterValue(blue_hue_min, value_type=int),
+                        "blue_hue_max": ParameterValue(blue_hue_max, value_type=int),
+                        "blue_saturation_min": ParameterValue(
+                            blue_saturation_min, value_type=int
+                        ),
+                        "blue_value_min": ParameterValue(blue_value_min, value_type=int),
                         "min_square_area": ParameterValue(min_square_area, value_type=float),
                         "min_square_fill_ratio": ParameterValue(
                             min_square_fill_ratio, value_type=float

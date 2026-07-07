@@ -31,11 +31,15 @@ constexpr int kTargetTypeDrop = 3;
 constexpr int kTargetTypeSearch = 4;
 constexpr double kPostPickupAltitudeCm = 120.0;
 constexpr double kLandingAltitudeCm = 15.0;
+constexpr double kPickupFailureReturnAltitudeCm = 110.0;
+constexpr double kPickupFailureLandingAltitudeCm = 10.0;
+constexpr double kSearchApproachPixelThresholdMultiplier = 2.0;
 
 const char * phaseToString(TaskPhase phase)
 {
   switch (phase) {
     case TaskPhase::Idle: return "Idle";
+    case TaskPhase::SearchApproaching: return "SearchApproaching";
     case TaskPhase::PickupAligning: return "PickupAligning";
     case TaskPhase::PickupDescending: return "PickupDescending";
     case TaskPhase::PickupHolding: return "PickupHolding";
@@ -79,6 +83,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   mission_complete_sent_(false),
   drop_failure_return_active_(false),
   aligned_frame_count_(0),
+  search_approach_altitude_cm_(0.0),
   phase_(TaskPhase::Idle),
   pickup_attempts_(0),
   magnet_sent_in_phase_(false),
@@ -148,8 +153,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     rclcpp::QoS(10),
     std::bind(&RouteTargetPublisherNode::fineDataCallback, this, std::placeholders::_1));
 
-  // 必须用节点的 clock 初始化所有 rclcpp::Time 成员，否则默认构造是 RCL_SYSTEM_TIME，
-  // 而 now() 返回 RCL_ROS_TIME，相减会抛 "can't subtract times with different time sources"。
+  // 必须用节点的 clock 初始化所�?rclcpp::Time 成员，否则默认构造是 RCL_SYSTEM_TIME�?
+  // �?now() 返回 RCL_ROS_TIME，相减会�?"can't subtract times with different time sources"�?
   phase_start_time_ = now();
   visual_takeover_start_time_ = now();
   last_target_republish_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
@@ -255,8 +260,11 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
 {
   Target published_target = target;
   switch (phase_) {
+    case TaskPhase::SearchApproaching:
+      published_target.z_cm = search_approach_altitude_cm_;
+      break;
     case TaskPhase::PickupAligning:
-      // 第一次对准：用航点 xy；重试时：用上一次对准成功时记录的 xy（更接近实际黑色正方形片位置）
+      // 第一次对准：用航�?xy；重试时：用上一次对准成功时记录�?xy（更接近实际黑色正方形片位置�?
       if (has_aligned_position_) {
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
@@ -273,7 +281,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = pickup_check_altitude_cm_;
       break;
     case TaskPhase::PickupDescending:
-      // 下降：z=抓取高度；XY 仍给出对准位置作为参考，实际 XY 由视觉接管修正
+      // 下降：z=抓取高度；XY 仍给出对准位置作为参考，实际 XY 由视觉接管修�?
       if (has_aligned_position_) {
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
@@ -496,6 +504,43 @@ void RouteTargetPublisherNode::startSearchFailureReturn(const rclcpp::Time & now
   advanceToNextTarget();
 }
 
+void RouteTargetPublisherNode::startPickupFailureReturn(const rclcpp::Time & now_time)
+{
+  publishElectromagnetControl(0x00);
+  publishServoControl(0x00);
+
+  if (pickup_failed_pub_) {
+    std_msgs::msg::Empty empty_msg;
+    pickup_failed_pub_->publish(empty_msg);
+  }
+
+  targets_.resize(current_idx_ + 1);
+  targets_.push_back(
+    Target{0.0, 0.0, kPickupFailureReturnAltitudeCm, 0.0, kTargetTypeWaypoint});
+  targets_.push_back(
+    Target{0.0, 0.0, kPickupFailureLandingAltitudeCm, 0.0, kTargetTypeWaypoint});
+
+  resetFineDataState();
+  publishVisionTargetMode(kVisionModeIdle);
+  if (visual_takeover_active_) {
+    visual_takeover_active_ = false;
+    publishVisualTakeoverState(false);
+  }
+
+  phase_ = TaskPhase::Idle;
+  phase_start_time_ = now_time;
+  has_aligned_position_ = false;
+  magnet_sent_in_phase_ = false;
+  mission_complete_sent_ = false;
+
+  RCLCPP_WARN(
+    get_logger(),
+    "Pickup failed after %d attempts. Returning via (0.0, 0.0, %.1fcm), then landing at %.1fcm.",
+    pickup_attempts_, kPickupFailureReturnAltitudeCm, kPickupFailureLandingAltitudeCm);
+
+  advanceToNextTarget();
+}
+
 void RouteTargetPublisherNode::insertPostPickupClimbTarget(
   double x_cm,
   double y_cm,
@@ -614,11 +659,13 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   // - PickupDescending keeps visual XY correction while descending to grab height.
   // - PickupObserving enables vision to decide whether the square is still visible.
   // PID already holds XY velocity at zero if /fine_data becomes stale.
+  const bool search_visual_phase = phase == TaskPhase::SearchApproaching;
   const bool pickup_visual_phase =
     phase == TaskPhase::PickupAligning ||
     phase == TaskPhase::PickupDescending ||
     phase == TaskPhase::PickupObserving;
   const bool takeover =
+    search_visual_phase ||
     pickup_visual_phase ||
     phase == TaskPhase::DropAligning;
   if (visual_takeover_active_ != takeover) {
@@ -627,12 +674,17 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   }
 
   uint8_t vision_mode = kVisionModeIdle;
-  if (pickup_visual_phase) {
+  if (search_visual_phase || pickup_visual_phase) {
     vision_mode = kVisionModeBlackSquare;
   } else if (phase == TaskPhase::DropAligning) {
     vision_mode = kVisionModeAprilTag;
   }
   publishVisionTargetMode(vision_mode);
+
+  if (phase == TaskPhase::SearchApproaching) {
+    aligned_frame_count_ = 0;
+    visual_takeover_start_time_ = now_time;
+  }
 
   // 进入 PickupAligning 时重置帧计数 + 视觉超时起点（重试场景必须重置）
   if (phase == TaskPhase::PickupAligning || phase == TaskPhase::DropAligning) {
@@ -645,7 +697,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
     resetFineDataState();
   }
 
-  // 下发新阶段对应的目标位置（z 由 getPublishedTarget 调整）
+  // 下发新阶段对应的目标位置（z �?getPublishedTarget 调整�?
   if (current_idx_ < targets_.size()) {
     publishTarget(getPublishedTarget(targets_[current_idx_]), false);
   }
@@ -714,13 +766,14 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         if (hasFreshFineData(now_time)) {
           RCLCPP_INFO(
             get_logger(),
-            "Detected search target from /fine_data at route target %zu. Switching to pickup.",
+            "Detected search target from /fine_data at route target %zu. Approaching visually at current height.",
             current_idx_);
+          search_approach_altitude_cm_ = has_height_ ? z_cm : target.z_cm;
           targets_[current_idx_].type = kTargetTypePickup;
           removePendingSearchTargetsAfterCurrent();
           pickup_attempts_ = 0;
           has_aligned_position_ = false;
-          setPhase(TaskPhase::PickupAligning, now_time);
+          setPhase(TaskPhase::SearchApproaching, now_time);
           return;
         }
       }
@@ -777,6 +830,53 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       return;
     }
 
+    case TaskPhase::SearchApproaching: {
+      if (phase_elapsed > visual_takeover_timeout_sec_) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Search visual approach timed out for target %zu after %.1fs. Returning home.",
+          current_idx_, phase_elapsed);
+        startSearchFailureReturn(now_time);
+        return;
+      }
+
+      if (!hasFreshFineData(now_time)) {
+        aligned_frame_count_ = 0;
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Waiting for fresh /fine_data while visually approaching search target %zu.",
+          current_idx_);
+        return;
+      }
+
+      const double pixel_radius = std::hypot(
+        static_cast<double>(fine_error_x_px_),
+        static_cast<double>(fine_error_y_px_));
+      const double rough_threshold =
+        visual_align_pixel_threshold_ * kSearchApproachPixelThresholdMultiplier;
+
+      RCLCPP_DEBUG_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "SearchApproaching %zu: x_px=%d y_px=%d r=%.1f rough_thr=%.1f z_hold=%.1fcm frames=%d/%d",
+        current_idx_, fine_error_x_px_, fine_error_y_px_,
+        pixel_radius, rough_threshold, search_approach_altitude_cm_,
+        aligned_frame_count_, visual_align_required_frames_);
+
+      if (pixel_radius < rough_threshold) {
+        ++aligned_frame_count_;
+        if (aligned_frame_count_ >= visual_align_required_frames_) {
+          RCLCPP_INFO(
+            get_logger(),
+            "Search target roughly centered at %.1fcm. Starting pickup alignment.",
+            search_approach_altitude_cm_);
+          setPhase(TaskPhase::PickupAligning, now_time);
+        }
+      } else {
+        aligned_frame_count_ = 0;
+      }
+      return;
+    }
+
     case TaskPhase::PickupAligning: {
       if (phase_elapsed > visual_takeover_timeout_sec_) {
         RCLCPP_WARN(
@@ -785,7 +885,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           current_idx_, phase_elapsed, pickup_attempts_ + 1, pickup_max_attempts_);
         publishElectromagnetControl(0x00);
         publishServoControl(0x00);
-        has_aligned_position_ = false;  // 超时跳过，清掉锁位
+        has_aligned_position_ = false;  // 超时跳过，清掉锁�?
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
         return;
@@ -818,8 +918,8 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (xy_ok && height_ok) {
         ++aligned_frame_count_;
         if (aligned_frame_count_ >= visual_align_required_frames_) {
-          // 对准成功：记录此刻无人机的真实 xy，作为后续下降/上升/重试的锁位坐标
-          // （黑色正方形片实物位置可能不在航点 xy 上，所以用真实位置代替航点坐标）
+          // 对准成功：记录此刻无人机的真�?xy，作为后续下�?上升/重试的锁位坐�?
+          // （黑色正方形片实物位置可能不在航�?xy 上，所以用真实位置代替航点坐标�?
           aligned_x_cm_ = x_cm;
           aligned_y_cm_ = y_cm;
           has_aligned_position_ = true;
@@ -902,7 +1002,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           std_msgs::msg::Empty empty_msg;
           pickup_done_pub_->publish(empty_msg);
         }
-        has_aligned_position_ = false;  // 抓取成功，清掉锁位
+        has_aligned_position_ = false;  // 抓取成功，清掉锁�?
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
         return;
@@ -912,28 +1012,16 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (pickup_attempts_ >= pickup_max_attempts_) {
         RCLCPP_WARN(
           get_logger(),
-          "Pickup FAILED after %d attempts at target %zu. Giving up, notifying action server.",
+          "Pickup FAILED after %d attempts at target %zu. Returning home.",
           pickup_attempts_, current_idx_);
-        publishElectromagnetControl(0x00);
-        publishServoControl(0x00);
-        // 通知 action server：抓取彻底失败，整个任务应判为失败
-        if (pickup_failed_pub_) {
-          std_msgs::msg::Empty empty_msg;
-          pickup_failed_pub_->publish(empty_msg);
-        }
-        has_aligned_position_ = false;  // 放弃，清掉锁位
-        setPhase(TaskPhase::Idle, now_time);
-        // 直接跳到任务末尾，让 monitor 进入稳定停止分支；
-        // 同时屏蔽 mission_complete 发送（这是失败终止，不应通知 STM32 关机）
-        current_idx_ = targets_.size();
-        mission_complete_sent_ = true;
+        startPickupFailureReturn(now_time);
       } else {
         RCLCPP_WARN(
           get_logger(),
           "Pickup retry at target %zu (attempt %d/%d). Magnet stays ON, returning to aligned (%.1f, %.1f) at z=%.1f.",
           current_idx_, pickup_attempts_ + 1, pickup_max_attempts_,
           aligned_x_cm_, aligned_y_cm_, pickup_align_altitude_cm_);
-        // 重试：电磁铁保持通电；has_aligned_position_ 保持 true，
+        // 重试：电磁铁保持通电；has_aligned_position_ 保持 true�?
         // getPublishedTarget 会用 aligned_x/y 作为目标，无人机回到上次对准位置（不是航点坐标）
         setPhase(TaskPhase::PickupAligning, now_time);
       }
@@ -1025,7 +1113,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     }
 
     case TaskPhase::DropActing: {
-      // 时序：t=0 已发 servo=01；t=drop_magnet_off_delay 发 magnet=00；t=drop_servo_down_duration 发 servo=00 → 离开
+      // 时序：t=0 已发 servo=01；t=drop_magnet_off_delay �?magnet=00；t=drop_servo_down_duration �?servo=00 �?离开
       if (!magnet_sent_in_phase_ && phase_elapsed >= drop_magnet_off_delay_sec_) {
         publishElectromagnetControl(0x00);
         magnet_sent_in_phase_ = true;
