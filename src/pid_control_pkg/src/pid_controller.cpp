@@ -145,7 +145,7 @@ PositionPIDController::PositionPIDController()
   visual_kd_y_(0.01),
   visual_pixel_deadzone_(5.0),
   visual_max_xy_velocity_(20.0),
-  visual_data_timeout_sec_(0.5),
+  visual_data_timeout_sec_(0.13),
   distance_xy_cm_(0.0),
   error_x_cm_(0.0),
   error_y_cm_(0.0),
@@ -426,7 +426,7 @@ void PositionPIDController::loadParameters()
   visual_kd_y_ = declare_parameter<double>("visual_kd_y", 0.01);
   visual_pixel_deadzone_ = declare_parameter<double>("visual_pixel_deadzone", 5.0);
   visual_max_xy_velocity_ = declare_parameter<double>("visual_max_xy_velocity", 20.0);
-  visual_data_timeout_sec_ = declare_parameter<double>("visual_data_timeout_sec", 0.5);
+  visual_data_timeout_sec_ = declare_parameter<double>("visual_data_timeout_sec", 0.13);
 
   pid_yaw_.setPID(kp_yaw, ki_yaw, kd_yaw);
   pid_z_.setPID(kp_z, ki_z, kd_z);

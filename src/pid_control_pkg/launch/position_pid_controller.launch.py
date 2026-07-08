@@ -38,7 +38,7 @@ def generate_launch_description() -> LaunchDescription:
         "visual_kd_y": 0.01,               # 视觉 Y 微分增益
         "visual_pixel_deadzone": 5.0,      # 像素死区
         "visual_max_xy_velocity": 20.0,    # 接管期间 XY 最大速度，单位 cm/s
-        "visual_data_timeout_sec": 0.5,    # fine_data 超时后将 XY 保持为 0，单位秒
+        "visual_data_timeout_sec": 0.13,   # fine_data 超时后将 XY 保持为 0，单位秒
     }
 
     return LaunchDescription([
