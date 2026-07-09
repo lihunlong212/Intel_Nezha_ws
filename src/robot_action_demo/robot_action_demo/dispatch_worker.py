@@ -429,7 +429,19 @@ class DispatchWorker(Node):
         return Path(__file__).resolve().parents[1] / "config" / DEFAULT_CONFIG_NAME
 
     def _select_task(self, item: str) -> LaunchTask | None:
-        return self._tasks.get(item) or self._tasks.get("*")
+        normalized_item = self._normalize_item(item)
+        return self._tasks.get(normalized_item) or self._tasks.get(item) or self._tasks.get("*")
+
+    @staticmethod
+    def _normalize_item(item: str) -> str:
+        item_lower = item.strip().lower()
+        if "华为" in item_lower or "huawei" in item_lower:
+            return "huawei"
+        if "苹果" in item_lower or "apple" in item_lower or "iphone" in item_lower:
+            return "apple"
+        if "小米" in item_lower or "xiaomi" in item_lower:
+            return "xiaomi"
+        return item
 
     def _start_launch_subprocess(self, task: LaunchTask) -> subprocess.Popen:
         env = os.environ.copy()

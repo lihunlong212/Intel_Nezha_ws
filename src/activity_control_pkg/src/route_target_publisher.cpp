@@ -23,7 +23,7 @@ namespace
 {
 constexpr double kDefaultTimerPeriodSec = 0.05;
 constexpr uint8_t kVisionModeIdle = 0;
-constexpr uint8_t kVisionModeRedSquare = 1;
+constexpr uint8_t kVisionModeColorSquare = 1;
 constexpr uint8_t kVisionModeAprilTag = 2;
 constexpr int kTargetTypeWaypoint = 1;
 constexpr int kTargetTypePickup = 2;
@@ -59,6 +59,11 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   current_idx_(std::numeric_limits<std::size_t>::max()),
   has_height_(false),
   current_height_cm_(0.0),
+  height_filter_jump_threshold_cm_(0.0),
+  height_filter_required_frames_(0),
+  has_height_filter_candidate_(false),
+  height_filter_candidate_cm_(0.0),
+  height_filter_candidate_frames_(0),
   visual_align_pixel_threshold_(0.0),
   visual_align_required_frames_(0),
   visual_takeover_timeout_sec_(0.0),
@@ -94,6 +99,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pos_tol_cm_ = declare_parameter("position_tolerance_cm", 9.0);
   yaw_tol_deg_ = declare_parameter("yaw_tolerance_deg", 5.0);
   height_tol_cm_ = declare_parameter("height_tolerance_cm", 12.0);
+  height_filter_jump_threshold_cm_ = declare_parameter("height_filter_jump_threshold_cm", 30.0);
+  height_filter_required_frames_ = declare_parameter("height_filter_required_frames", 5);
   map_frame_ = declare_parameter("map_frame", "map");
   laser_link_frame_ = declare_parameter("laser_link_frame", "laser_link");
   output_topic_ = declare_parameter("output_topic", "/target_position");
@@ -115,7 +122,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   circle_lost_window_sec_ = declare_parameter("circle_lost_window_sec", 1.0);
   // 投放参数（独立）
   drop_altitude_cm_ = declare_parameter("drop_altitude_cm", 40.0);
-  drop_align_altitude_cm_ = declare_parameter("drop_align_altitude_cm", 40.0);
+  drop_align_altitude_cm_ = declare_parameter("drop_align_altitude_cm", 50.0);
   drop_servo_down_duration_sec_ = declare_parameter("drop_servo_down_duration_sec", 2.0);
   drop_magnet_off_delay_sec_ = declare_parameter("drop_magnet_off_delay_sec", 1.0);
 
@@ -176,6 +183,10 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     get_logger(),
     "Tolerances: position=%.1fcm yaw=%.1fdeg height=%.1fcm",
     pos_tol_cm_, yaw_tol_deg_, height_tol_cm_);
+  RCLCPP_INFO(
+    get_logger(),
+    "Height filter: jump_threshold=%.1fcm required_frames=%d",
+    height_filter_jump_threshold_cm_, height_filter_required_frames_);
   RCLCPP_INFO(
     get_logger(),
     "Visual align: threshold=%.1fpx frames=%d timeout=%.1fs stale=%.1fs",
@@ -314,14 +325,62 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
 
 void RouteTargetPublisherNode::heightCallback(const std_msgs::msg::Int16::SharedPtr msg)
 {
-  current_height_cm_ = static_cast<double>(msg->data);
-  has_height_ = true;
-  RCLCPP_DEBUG_THROTTLE(
-    get_logger(), *get_clock(), 1000,
-    "Route monitor received /height: %.1fcm",
-    current_height_cm_);
-}
+  const double raw_height_cm = static_cast<double>(msg->data);
+  const double jump_threshold_cm = std::max(0.0, height_filter_jump_threshold_cm_);
+  const int required_frames = std::max(1, height_filter_required_frames_);
 
+  if (!has_height_) {
+    current_height_cm_ = raw_height_cm;
+    has_height_ = true;
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "Route monitor accepted first /height: %.1fcm",
+      current_height_cm_);
+    return;
+  }
+
+  const double accepted_delta_cm = std::fabs(raw_height_cm - current_height_cm_);
+  if (jump_threshold_cm <= 0.0 || accepted_delta_cm <= jump_threshold_cm || required_frames <= 1) {
+    current_height_cm_ = raw_height_cm;
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "Route monitor accepted /height: %.1fcm",
+      current_height_cm_);
+    return;
+  }
+
+  if (!has_height_filter_candidate_ ||
+    std::fabs(raw_height_cm - height_filter_candidate_cm_) > jump_threshold_cm)
+  {
+    height_filter_candidate_cm_ = raw_height_cm;
+    height_filter_candidate_frames_ = 1;
+    has_height_filter_candidate_ = true;
+  } else {
+    height_filter_candidate_cm_ = raw_height_cm;
+    ++height_filter_candidate_frames_;
+  }
+
+  if (height_filter_candidate_frames_ >= required_frames) {
+    current_height_cm_ = raw_height_cm;
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    RCLCPP_WARN(
+      get_logger(),
+      "Accepted /height jump after %d consecutive frames: %.1fcm",
+      required_frames, current_height_cm_);
+    return;
+  }
+
+  RCLCPP_WARN_THROTTLE(
+    get_logger(), *get_clock(), 1000,
+    "Filtered /height jump raw=%.1fcm accepted=%.1fcm delta=%.1fcm candidate_frames=%d/%d",
+    raw_height_cm, current_height_cm_, accepted_delta_cm,
+    height_filter_candidate_frames_, required_frames);
+}
 void RouteTargetPublisherNode::fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg)
 {
   if (msg->data.size() < 2) {
@@ -613,7 +672,7 @@ void RouteTargetPublisherNode::publishIdleVisionModeForCurrentTarget()
 
   publishVisionTargetMode(
     targets_[current_idx_].type == kTargetTypeSearch ?
-    kVisionModeRedSquare : kVisionModeIdle);
+    kVisionModeColorSquare : kVisionModeIdle);
 }
 
 void RouteTargetPublisherNode::publishVisualTakeoverState(bool active)
@@ -655,7 +714,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   magnet_sent_in_phase_ = false;
 
   // Visual takeover:
-  // - PickupAligning aligns over the red square at the approach height.
+  // - PickupAligning aligns over the color square at the approach height.
   // - PickupDescending keeps visual XY correction while descending to grab height.
   // - PickupObserving enables vision to decide whether the square is still visible.
   // PID already holds XY velocity at zero if /fine_data becomes stale.
@@ -673,9 +732,13 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
     publishVisualTakeoverState(takeover);
   }
 
+  if (phase == TaskPhase::DropAligning) {
+    publishServoControl(0x00);
+  }
+
   uint8_t vision_mode = kVisionModeIdle;
   if (search_visual_phase || pickup_visual_phase) {
-    vision_mode = kVisionModeRedSquare;
+    vision_mode = kVisionModeColorSquare;
   } else if (phase == TaskPhase::DropAligning) {
     vision_mode = kVisionModeAprilTag;
   }
@@ -762,7 +825,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
   switch (phase_) {
     case TaskPhase::Idle: {
       if (target.type == kTargetTypeSearch) {
-        publishVisionTargetMode(kVisionModeRedSquare);
+        publishVisionTargetMode(kVisionModeColorSquare);
         if (hasFreshFineData(now_time)) {
           RCLCPP_INFO(
             get_logger(),
@@ -985,7 +1048,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         return;
       }
 
-      // Pickup succeeds when the red square disappears from /fine_data during observation.
+      // Pickup succeeds when the color square disappears from /fine_data during observation.
       const bool square_seen = pickup_observed_fine_data_;
 
       if (!square_seen) {
@@ -996,6 +1059,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         const double climb_x_cm = has_aligned_position_ ? aligned_x_cm_ : x_cm;
         const double climb_y_cm = has_aligned_position_ ? aligned_y_cm_ : y_cm;
         const double climb_yaw_deg = target.yaw_deg;
+        publishServoControl(0x01);
         insertPostPickupClimbTarget(climb_x_cm, climb_y_cm, climb_yaw_deg);
         // 通知 action server：抓取完成，进入送货阶段
         if (pickup_done_pub_) {
@@ -1044,11 +1108,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
     case TaskPhase::DropAligning: {
       if (phase_elapsed > visual_takeover_timeout_sec_) {
-        RCLCPP_ERROR(
+        RCLCPP_WARN(
           get_logger(),
-          "Drop alignment timed out for target %zu after %.1fs. Returning home without magnet release.",
+          "Drop alignment timed out for target %zu after %.1fs. Continuing with timed drop without AprilTag lock.",
           current_idx_, phase_elapsed);
-        startDropFailureReturn(now_time, yaw_deg);
+        setPhase(TaskPhase::DropDescending, now_time);
         return;
       }
 
@@ -1092,11 +1156,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
     case TaskPhase::DropDescending: {
       if (phase_elapsed > visual_takeover_timeout_sec_) {
-        RCLCPP_ERROR(
+        RCLCPP_WARN(
           get_logger(),
-          "Drop descent timed out for target %zu after %.1fs. Returning home without magnet release.",
+          "Drop descent timed out for target %zu after %.1fs. Releasing at current height.",
           current_idx_, phase_elapsed);
-        startDropFailureReturn(now_time, yaw_deg);
+        setPhase(TaskPhase::DropActing, now_time);
         return;
       }
 
@@ -1106,7 +1170,6 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         "DropDescending %zu: z=%.1fcm target=%.1fcm err=%.1fcm",
         current_idx_, z_cm, drop_altitude_cm_, height_error_cm);
       if (std::fabs(height_error_cm) <= height_tol_cm_) {
-        publishServoControl(0x01);
         setPhase(TaskPhase::DropActing, now_time);
       }
       return;
@@ -1195,7 +1258,7 @@ std::vector<Target> RouteTestNode::buildRoute() const
     Target{30.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
     Target{130.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
 
-    Target{193.0, 52.0, 120.0, 0.0, kTargetTypePickup},
+    Target{193.0, 52.0, 120.0, 0.0, kTargetTypeDrop},
     
     Target{130.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
     Target{30.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},

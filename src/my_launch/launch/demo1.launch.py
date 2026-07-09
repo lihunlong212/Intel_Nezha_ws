@@ -1,8 +1,9 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -12,6 +13,8 @@ def _package_launch(package_name: str, filename: str) -> str:
 
 
 def generate_launch_description() -> LaunchDescription:
+    target_square_color = LaunchConfiguration("target_square_color")
+
     fly_carto_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(_package_launch("my_carto_pkg", "fly_carto.launch.py"))
     )
@@ -29,11 +32,17 @@ def generate_launch_description() -> LaunchDescription:
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             _package_launch("drone_camera_pkg", "black_circle_camera.launch.py")
-        )
+        ),
+        launch_arguments={"target_square_color": target_square_color}.items(),
     )
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "target_square_color",
+                default_value="red",
+                description="Initial color square target: red, black, or blue.",
+            ),
             fly_carto_launch,
             TimerAction(period=2.0, actions=[uart_to_stm32_launch]),
             TimerAction(period=4.0, actions=[camera_launch]),

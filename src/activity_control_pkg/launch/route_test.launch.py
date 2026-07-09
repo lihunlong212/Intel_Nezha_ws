@@ -31,6 +31,8 @@ def generate_launch_description():
                     "position_tolerance_cm": 8.0,
                     "yaw_tolerance_deg": 8.0,
                     "height_tolerance_cm": 8.0,
+                    "height_filter_jump_threshold_cm": 30.0,
+                    "height_filter_required_frames": 5,
                     "visual_align_pixel_threshold": 50.0,
                     "visual_align_required_frames": 3,
                     "visual_takeover_timeout_sec": 15.0,
@@ -44,8 +46,8 @@ def generate_launch_description():
                     "pickup_max_attempts": 3,
                     "circle_lost_window_sec": 1.0,
                     # 投放航点（type=3）参数
-                    "drop_altitude_cm": 35.0,
-                    "drop_align_altitude_cm": 45.0,
+                    "drop_altitude_cm": 40.0,
+                    "drop_align_altitude_cm": 50.0,
                     "drop_servo_down_duration_sec": 2.0,
                     "drop_magnet_off_delay_sec": 1.0,
                 }

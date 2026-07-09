@@ -1,6 +1,18 @@
 target_domain_id: "0"
 tasks:
+  huawei:
+    package: "my_launch"
+    launch_file: "demo1.launch.py"
+    args: ["target_square_color:=red"]
+  apple:
+    package: "my_launch"
+    launch_file: "demo1.launch.py"
+    args: ["target_square_color:=black"]
+  xiaomi:
+    package: "my_launch"
+    launch_file: "demo1.launch.py"
+    args: ["target_square_color:=blue"]
   "*":
     package: "my_launch"
     launch_file: "demo1.launch.py"
-    args: []
+    args: ["target_square_color:=red"]

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -17,6 +18,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int8.hpp>
 
 class DroneCameraNode : public rclcpp::Node
@@ -32,22 +34,26 @@ public:
     window_name_(declare_parameter<std::string>("window_name", "drone_camera_preview")),
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
     vision_mode_topic_(declare_parameter<std::string>("vision_mode_topic", "/vision_target_mode")),
-    red_hue_low_min_(declare_parameter<int>(
-      "red_hue_low_min", declare_parameter<int>("blue_hue_min", 0))),
-    red_hue_low_max_(declare_parameter<int>(
-      "red_hue_low_max", declare_parameter<int>("blue_hue_max", 10))),
+    square_color_topic_(declare_parameter<std::string>("square_color_topic", "/vision_square_color")),
+    target_square_color_(normalizeSquareColor(
+      declare_parameter<std::string>("target_square_color", "red"))),
+    red_hue_low_min_(declare_parameter<int>("red_hue_low_min", 0)),
+    red_hue_low_max_(declare_parameter<int>("red_hue_low_max", 10)),
     red_hue_high_min_(declare_parameter<int>("red_hue_high_min", 170)),
     red_hue_high_max_(declare_parameter<int>("red_hue_high_max", 179)),
-    red_saturation_min_(declare_parameter<int>(
-      "red_saturation_min", declare_parameter<int>("blue_saturation_min", 60))),
-    red_value_min_(declare_parameter<int>(
-      "red_value_min", declare_parameter<int>("blue_value_min", 50))),
+    red_saturation_min_(declare_parameter<int>("red_saturation_min", 60)),
+    red_value_min_(declare_parameter<int>("red_value_min", 50)),
+    blue_hue_min_(declare_parameter<int>("blue_hue_min", 58)),
+    blue_hue_max_(declare_parameter<int>("blue_hue_max", 111)),
+    blue_saturation_min_(declare_parameter<int>("blue_saturation_min", 49)),
+    blue_value_min_(declare_parameter<int>("blue_value_min", 75)),
+    black_value_max_(declare_parameter<int>("black_value_max", 80)),
     min_square_area_(declare_parameter<double>(
       "min_square_area", declare_parameter<double>("min_circle_area", 340.0))),
     min_square_fill_ratio_(declare_parameter<double>("min_square_fill_ratio", 0.22)),
     apriltag_dictionary_name_(declare_parameter<std::string>("apriltag_dictionary", "DICT_APRILTAG_36h11")),
     apriltag_target_id_(declare_parameter<int>("apriltag_target_id", -1)),
-    vision_target_mode_(kVisionModeRedSquare)
+    vision_target_mode_(kVisionModeColorSquare)
   {
     apriltag_dictionary_ = cv::aruco::getPredefinedDictionary(
       dictionaryFromName(apriltag_dictionary_name_));
@@ -59,6 +65,10 @@ public:
     vision_mode_sub_ = create_subscription<std_msgs::msg::UInt8>(
       vision_mode_topic_, mode_qos,
       std::bind(&DroneCameraNode::visionModeCallback, this, std::placeholders::_1));
+    auto color_qos = rclcpp::QoS(10).reliable();
+    square_color_sub_ = create_subscription<std_msgs::msg::String>(
+      square_color_topic_, color_qos,
+      std::bind(&DroneCameraNode::squareColorCallback, this, std::placeholders::_1));
 
     if (!camera_.open(camera_device_)) {
       throw std::runtime_error("Failed to open camera device " + camera_device_);
@@ -81,17 +91,24 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s red_hsv_low=[%d,%d] red_hsv_high=[%d,%d] s_min=%d v_min=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
+      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s square_color_topic=%s target_square_color=%s red_hsv_low=[%d,%d] red_hsv_high=[%d,%d] red_s_min=%d red_v_min=%d blue_hsv=[%d,%d] blue_s_min=%d blue_v_min=%d black_v_max=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
       camera_device_.c_str(),
       show_preview_ ? "true" : "false",
       fine_data_topic_.c_str(),
       vision_mode_topic_.c_str(),
+      square_color_topic_.c_str(),
+      target_square_color_.c_str(),
       red_hue_low_min_,
       red_hue_low_max_,
       red_hue_high_min_,
       red_hue_high_max_,
       red_saturation_min_,
       red_value_min_,
+      blue_hue_min_,
+      blue_hue_max_,
+      blue_saturation_min_,
+      blue_value_min_,
+      black_value_max_,
       min_square_area_,
       min_square_fill_ratio_,
       apriltag_dictionary_name_.c_str(),
@@ -133,6 +150,24 @@ private:
     return cv::aruco::DICT_APRILTAG_36h11;
   }
 
+  static std::string normalizeSquareColor(const std::string & color)
+  {
+    std::string normalized = color;
+    std::transform(
+      normalized.begin(), normalized.end(), normalized.begin(),
+      [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+      });
+
+    if (normalized == "black" || normalized == "apple" || normalized == "iphone") {
+      return "black";
+    }
+    if (normalized == "blue" || normalized == "xiaomi" || normalized == "mi") {
+      return "blue";
+    }
+    return "red";
+  }
+
   void visionModeCallback(const std_msgs::msg::UInt8::SharedPtr msg)
   {
     const uint8_t mode = msg->data;
@@ -149,6 +184,16 @@ private:
     RCLCPP_INFO(
       get_logger(), "Vision target mode changed to %u",
       static_cast<unsigned int>(vision_target_mode_));
+  }
+
+  void squareColorCallback(const std_msgs::msg::String::SharedPtr msg)
+  {
+    const std::string normalized = normalizeSquareColor(msg->data);
+    if (target_square_color_ == normalized) {
+      return;
+    }
+    target_square_color_ = normalized;
+    RCLCPP_INFO(get_logger(), "Square target color changed to %s", target_square_color_.c_str());
   }
 
   void publishFineDataFromCenter(const cv::Mat & frame, const cv::Point2f & center)
@@ -177,32 +222,47 @@ private:
     return std::abs((ux * vx + uy * vy) / denominator);
   }
 
-  void detectRedSquareAndPublish(cv::Mat & frame)
+  void detectSelectedSquareAndPublish(cv::Mat & frame)
   {
     cv::Mat hsv;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
 
     cv::GaussianBlur(hsv, hsv, cv::Size(5, 5), 0.0);
-    cv::Mat mask_low;
-    cv::Mat mask_high;
     cv::Mat mask;
-    const int hue_low_min = std::max(0, std::min(red_hue_low_min_, 179));
-    const int hue_low_max = std::max(0, std::min(red_hue_low_max_, 179));
-    const int hue_high_min = std::max(0, std::min(red_hue_high_min_, 179));
-    const int hue_high_max = std::max(0, std::min(red_hue_high_max_, 179));
-    const int saturation_min = std::max(0, std::min(red_saturation_min_, 255));
-    const int value_min = std::max(0, std::min(red_value_min_, 255));
-    cv::inRange(
-      hsv,
-      cv::Scalar(hue_low_min, saturation_min, value_min),
-      cv::Scalar(hue_low_max, 255, 255),
-      mask_low);
-    cv::inRange(
-      hsv,
-      cv::Scalar(hue_high_min, saturation_min, value_min),
-      cv::Scalar(hue_high_max, 255, 255),
-      mask_high);
-    cv::bitwise_or(mask_low, mask_high, mask);
+    if (target_square_color_ == "black") {
+      const int value_max = std::max(0, std::min(black_value_max_, 255));
+      cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(179, 255, value_max), mask);
+    } else if (target_square_color_ == "blue") {
+      const int hue_min = std::max(0, std::min(blue_hue_min_, 179));
+      const int hue_max = std::max(0, std::min(blue_hue_max_, 179));
+      const int saturation_min = std::max(0, std::min(blue_saturation_min_, 255));
+      const int value_min = std::max(0, std::min(blue_value_min_, 255));
+      cv::inRange(
+        hsv,
+        cv::Scalar(hue_min, saturation_min, value_min),
+        cv::Scalar(hue_max, 255, 255),
+        mask);
+    } else {
+      cv::Mat mask_low;
+      cv::Mat mask_high;
+      const int hue_low_min = std::max(0, std::min(red_hue_low_min_, 179));
+      const int hue_low_max = std::max(0, std::min(red_hue_low_max_, 179));
+      const int hue_high_min = std::max(0, std::min(red_hue_high_min_, 179));
+      const int hue_high_max = std::max(0, std::min(red_hue_high_max_, 179));
+      const int saturation_min = std::max(0, std::min(red_saturation_min_, 255));
+      const int value_min = std::max(0, std::min(red_value_min_, 255));
+      cv::inRange(
+        hsv,
+        cv::Scalar(hue_low_min, saturation_min, value_min),
+        cv::Scalar(hue_low_max, 255, 255),
+        mask_low);
+      cv::inRange(
+        hsv,
+        cv::Scalar(hue_high_min, saturation_min, value_min),
+        cv::Scalar(hue_high_max, 255, 255),
+        mask_high);
+      cv::bitwise_or(mask_low, mask_high, mask);
+    }
 
     const cv::Mat close_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
     const cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
@@ -287,9 +347,8 @@ private:
     if (best.contour_index < 0) {
       RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "No red square found. low_hue=[%d,%d] high_hue=[%d,%d] s_min=%d v_min=%d contours=%zu",
-        hue_low_min, hue_low_max, hue_high_min, hue_high_max,
-        saturation_min, value_min, contours.size());
+        "No %s square found. contours=%zu",
+        target_square_color_.c_str(), contours.size());
       return;
     }
 
@@ -385,8 +444,8 @@ private:
       }
     }
 
-    if (vision_target_mode_ == kVisionModeRedSquare) {
-      detectRedSquareAndPublish(frame);
+    if (vision_target_mode_ == kVisionModeColorSquare) {
+      detectSelectedSquareAndPublish(frame);
     } else if (vision_target_mode_ == kVisionModeAprilTag) {
       detectAprilTagAndPublish(frame);
     }
@@ -405,12 +464,19 @@ private:
   std::string window_name_;
   std::string fine_data_topic_;
   std::string vision_mode_topic_;
+  std::string square_color_topic_;
+  std::string target_square_color_;
   int red_hue_low_min_;
   int red_hue_low_max_;
   int red_hue_high_min_;
   int red_hue_high_max_;
   int red_saturation_min_;
   int red_value_min_;
+  int blue_hue_min_;
+  int blue_hue_max_;
+  int blue_saturation_min_;
+  int blue_value_min_;
+  int black_value_max_;
   double min_square_area_;
   double min_square_fill_ratio_;
   std::string apriltag_dictionary_name_;
@@ -421,12 +487,13 @@ private:
   cv::VideoCapture camera_;
   rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_pub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr vision_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr square_color_sub_;
   rclcpp::TimerBase::SharedPtr frame_timer_;
   cv::Ptr<cv::aruco::Dictionary> apriltag_dictionary_;
   cv::Ptr<cv::aruco::DetectorParameters> apriltag_parameters_;
 
   static constexpr uint8_t kVisionModeIdle = 0;
-  static constexpr uint8_t kVisionModeRedSquare = 1;
+  static constexpr uint8_t kVisionModeColorSquare = 1;
   static constexpr uint8_t kVisionModeAprilTag = 2;
   static constexpr double kMaxSquareAspectRatio = 1.25;
   static constexpr double kMaxSquareCornerCosine = 0.35;

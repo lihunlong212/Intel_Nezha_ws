@@ -111,6 +111,11 @@ private:
 
   bool has_height_;
   double current_height_cm_;
+  double height_filter_jump_threshold_cm_;
+  int height_filter_required_frames_;
+  bool has_height_filter_candidate_;
+  double height_filter_candidate_cm_;
+  int height_filter_candidate_frames_;
 
   double pos_tol_cm_;
   double yaw_tol_deg_;
