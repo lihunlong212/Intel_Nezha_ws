@@ -32,16 +32,22 @@ public:
     window_name_(declare_parameter<std::string>("window_name", "drone_camera_preview")),
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
     vision_mode_topic_(declare_parameter<std::string>("vision_mode_topic", "/vision_target_mode")),
-    blue_hue_min_(declare_parameter<int>("blue_hue_min", 58)),
-    blue_hue_max_(declare_parameter<int>("blue_hue_max", 111)),
-    blue_saturation_min_(declare_parameter<int>("blue_saturation_min", 49)),
-    blue_value_min_(declare_parameter<int>("blue_value_min", 75)),
+    red_hue_low_min_(declare_parameter<int>(
+      "red_hue_low_min", declare_parameter<int>("blue_hue_min", 0))),
+    red_hue_low_max_(declare_parameter<int>(
+      "red_hue_low_max", declare_parameter<int>("blue_hue_max", 10))),
+    red_hue_high_min_(declare_parameter<int>("red_hue_high_min", 170)),
+    red_hue_high_max_(declare_parameter<int>("red_hue_high_max", 179)),
+    red_saturation_min_(declare_parameter<int>(
+      "red_saturation_min", declare_parameter<int>("blue_saturation_min", 60))),
+    red_value_min_(declare_parameter<int>(
+      "red_value_min", declare_parameter<int>("blue_value_min", 50))),
     min_square_area_(declare_parameter<double>(
       "min_square_area", declare_parameter<double>("min_circle_area", 340.0))),
     min_square_fill_ratio_(declare_parameter<double>("min_square_fill_ratio", 0.22)),
     apriltag_dictionary_name_(declare_parameter<std::string>("apriltag_dictionary", "DICT_APRILTAG_36h11")),
     apriltag_target_id_(declare_parameter<int>("apriltag_target_id", -1)),
-    vision_target_mode_(kVisionModeBlackSquare)
+    vision_target_mode_(kVisionModeRedSquare)
   {
     apriltag_dictionary_ = cv::aruco::getPredefinedDictionary(
       dictionaryFromName(apriltag_dictionary_name_));
@@ -75,15 +81,17 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s blue_hsv=[%d,%d] s_min=%d v_min=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
+      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s red_hsv_low=[%d,%d] red_hsv_high=[%d,%d] s_min=%d v_min=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
       camera_device_.c_str(),
       show_preview_ ? "true" : "false",
       fine_data_topic_.c_str(),
       vision_mode_topic_.c_str(),
-      blue_hue_min_,
-      blue_hue_max_,
-      blue_saturation_min_,
-      blue_value_min_,
+      red_hue_low_min_,
+      red_hue_low_max_,
+      red_hue_high_min_,
+      red_hue_high_max_,
+      red_saturation_min_,
+      red_value_min_,
       min_square_area_,
       min_square_fill_ratio_,
       apriltag_dictionary_name_.c_str(),
@@ -169,22 +177,32 @@ private:
     return std::abs((ux * vx + uy * vy) / denominator);
   }
 
-  void detectBlueSquareAndPublish(cv::Mat & frame)
+  void detectRedSquareAndPublish(cv::Mat & frame)
   {
     cv::Mat hsv;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
 
     cv::GaussianBlur(hsv, hsv, cv::Size(5, 5), 0.0);
+    cv::Mat mask_low;
+    cv::Mat mask_high;
     cv::Mat mask;
-    const int hue_min = std::max(0, std::min(blue_hue_min_, 179));
-    const int hue_max = std::max(0, std::min(blue_hue_max_, 179));
-    const int saturation_min = std::max(0, std::min(blue_saturation_min_, 255));
-    const int value_min = std::max(0, std::min(blue_value_min_, 255));
+    const int hue_low_min = std::max(0, std::min(red_hue_low_min_, 179));
+    const int hue_low_max = std::max(0, std::min(red_hue_low_max_, 179));
+    const int hue_high_min = std::max(0, std::min(red_hue_high_min_, 179));
+    const int hue_high_max = std::max(0, std::min(red_hue_high_max_, 179));
+    const int saturation_min = std::max(0, std::min(red_saturation_min_, 255));
+    const int value_min = std::max(0, std::min(red_value_min_, 255));
     cv::inRange(
       hsv,
-      cv::Scalar(hue_min, saturation_min, value_min),
-      cv::Scalar(hue_max, 255, 255),
-      mask);
+      cv::Scalar(hue_low_min, saturation_min, value_min),
+      cv::Scalar(hue_low_max, 255, 255),
+      mask_low);
+    cv::inRange(
+      hsv,
+      cv::Scalar(hue_high_min, saturation_min, value_min),
+      cv::Scalar(hue_high_max, 255, 255),
+      mask_high);
+    cv::bitwise_or(mask_low, mask_high, mask);
 
     const cv::Mat close_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
     const cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
@@ -269,8 +287,9 @@ private:
     if (best.contour_index < 0) {
       RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "No blue square found. hue=[%d,%d] s_min=%d v_min=%d contours=%zu",
-        hue_min, hue_max, saturation_min, value_min, contours.size());
+        "No red square found. low_hue=[%d,%d] high_hue=[%d,%d] s_min=%d v_min=%d contours=%zu",
+        hue_low_min, hue_low_max, hue_high_min, hue_high_max,
+        saturation_min, value_min, contours.size());
       return;
     }
 
@@ -366,8 +385,8 @@ private:
       }
     }
 
-    if (vision_target_mode_ == kVisionModeBlackSquare) {
-      detectBlueSquareAndPublish(frame);
+    if (vision_target_mode_ == kVisionModeRedSquare) {
+      detectRedSquareAndPublish(frame);
     } else if (vision_target_mode_ == kVisionModeAprilTag) {
       detectAprilTagAndPublish(frame);
     }
@@ -386,10 +405,12 @@ private:
   std::string window_name_;
   std::string fine_data_topic_;
   std::string vision_mode_topic_;
-  int blue_hue_min_;
-  int blue_hue_max_;
-  int blue_saturation_min_;
-  int blue_value_min_;
+  int red_hue_low_min_;
+  int red_hue_low_max_;
+  int red_hue_high_min_;
+  int red_hue_high_max_;
+  int red_saturation_min_;
+  int red_value_min_;
   double min_square_area_;
   double min_square_fill_ratio_;
   std::string apriltag_dictionary_name_;
@@ -405,7 +426,7 @@ private:
   cv::Ptr<cv::aruco::DetectorParameters> apriltag_parameters_;
 
   static constexpr uint8_t kVisionModeIdle = 0;
-  static constexpr uint8_t kVisionModeBlackSquare = 1;
+  static constexpr uint8_t kVisionModeRedSquare = 1;
   static constexpr uint8_t kVisionModeAprilTag = 2;
   static constexpr double kMaxSquareAspectRatio = 1.25;
   static constexpr double kMaxSquareCornerCosine = 0.35;

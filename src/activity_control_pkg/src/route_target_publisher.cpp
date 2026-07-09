@@ -23,7 +23,7 @@ namespace
 {
 constexpr double kDefaultTimerPeriodSec = 0.05;
 constexpr uint8_t kVisionModeIdle = 0;
-constexpr uint8_t kVisionModeBlackSquare = 1;
+constexpr uint8_t kVisionModeRedSquare = 1;
 constexpr uint8_t kVisionModeAprilTag = 2;
 constexpr int kTargetTypeWaypoint = 1;
 constexpr int kTargetTypePickup = 2;
@@ -613,7 +613,7 @@ void RouteTargetPublisherNode::publishIdleVisionModeForCurrentTarget()
 
   publishVisionTargetMode(
     targets_[current_idx_].type == kTargetTypeSearch ?
-    kVisionModeBlackSquare : kVisionModeIdle);
+    kVisionModeRedSquare : kVisionModeIdle);
 }
 
 void RouteTargetPublisherNode::publishVisualTakeoverState(bool active)
@@ -655,7 +655,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   magnet_sent_in_phase_ = false;
 
   // Visual takeover:
-  // - PickupAligning aligns over the black square at the approach height.
+  // - PickupAligning aligns over the red square at the approach height.
   // - PickupDescending keeps visual XY correction while descending to grab height.
   // - PickupObserving enables vision to decide whether the square is still visible.
   // PID already holds XY velocity at zero if /fine_data becomes stale.
@@ -675,7 +675,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
 
   uint8_t vision_mode = kVisionModeIdle;
   if (search_visual_phase || pickup_visual_phase) {
-    vision_mode = kVisionModeBlackSquare;
+    vision_mode = kVisionModeRedSquare;
   } else if (phase == TaskPhase::DropAligning) {
     vision_mode = kVisionModeAprilTag;
   }
@@ -762,7 +762,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
   switch (phase_) {
     case TaskPhase::Idle: {
       if (target.type == kTargetTypeSearch) {
-        publishVisionTargetMode(kVisionModeBlackSquare);
+        publishVisionTargetMode(kVisionModeRedSquare);
         if (hasFreshFineData(now_time)) {
           RCLCPP_INFO(
             get_logger(),
@@ -985,7 +985,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         return;
       }
 
-      // Pickup succeeds when the black square disappears from /fine_data during observation.
+      // Pickup succeeds when the red square disappears from /fine_data during observation.
       const bool square_seen = pickup_observed_fine_data_;
 
       if (!square_seen) {
