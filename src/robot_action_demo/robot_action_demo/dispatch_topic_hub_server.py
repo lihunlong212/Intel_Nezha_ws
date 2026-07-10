@@ -90,12 +90,6 @@ class DispatchTopicHubServer(Node):
             order["event"] = "order"
             order["created_at"] = time.time()
             self._publish_json(self._order_pub, order)
-            self._publish_feedback(
-                goal_handle,
-                "ORDER_BROADCAST",
-                0.02,
-                f"task {task_id} broadcast to {ORDERS_TOPIC}",
-            )
 
             deadline = time.monotonic() + self._timeout_sec
             while rclpy.ok():
@@ -164,13 +158,10 @@ class DispatchTopicHubServer(Node):
     def _handle_event(self, goal_handle, event: dict[str, Any]):
         event_type = str(event.get("event") or "feedback")
         task_id = str(event.get("task_id") or goal_handle.request.task_id)
-        state = str(event.get("current_state") or event.get("final_state") or event_type)
         detail = str(event.get("detail") or "")
-        progress = float(event.get("progress") or 0.0)
 
         terminal_events = {"result", "done", "succeeded", "failed", "aborted", "canceled"}
         if event_type not in terminal_events:
-            self._publish_feedback(goal_handle, state, progress, detail)
             return None
 
         success = bool(event.get("success", event_type in {"done", "succeeded"}))
@@ -184,13 +175,6 @@ class DispatchTopicHubServer(Node):
         else:
             goal_handle.abort()
         return self._make_result(task_id, success, final_state, detail)
-
-    def _publish_feedback(self, goal_handle, state: str, progress: float, detail: str) -> None:
-        feedback = DispatchOrder.Feedback()
-        feedback.current_state = state
-        feedback.progress = max(0.0, min(1.0, float(progress)))
-        feedback.detail = detail
-        goal_handle.publish_feedback(feedback)
 
     def _make_result(
         self,
@@ -224,7 +208,8 @@ def main(args=None) -> None:
     finally:
         executor.remove_node(node)
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

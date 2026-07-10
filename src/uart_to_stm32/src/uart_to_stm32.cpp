@@ -54,8 +54,8 @@ bool UartToStm32::initialize(double update_rate, const std::string & source_fram
       source_frame_.c_str(), target_frame_.c_str());
 
     serial_comm_ = std::make_unique<serial_comm::SerialComm>();
-    if (!serial_comm_->initialize("/dev/ttyS4", 921600)) {
-      RCLCPP_ERROR(node_->get_logger(), "Failed to initialize serial port /dev/ttyS4 at 921600 baudrate");
+    if (!serial_comm_->initialize("/dev/ttyS6", 921600)) {
+      RCLCPP_ERROR(node_->get_logger(), "Failed to initialize serial port /dev/ttyS6 at 921600 baudrate");
       RCLCPP_ERROR(node_->get_logger(), "Serial error: %s", serial_comm_->get_last_error().c_str());
       return false;
     }
@@ -90,7 +90,7 @@ bool UartToStm32::initialize(double update_rate, const std::string & source_fram
       std::bind(&UartToStm32::missionCompleteCallback, this, std::placeholders::_1));
 
     delivery_command_pub_ = node_->create_publisher<std_msgs::msg::String>("/delivery_command", rclcpp::QoS(10));
-    height_pub_ = node_->create_publisher<std_msgs::msg::Int16>("/height", 10);
+    height_pub_ = node_->create_publisher<std_msgs::msg::Int16>("/height_raw", 10);
     is_st_ready_pub_ =
       node_->create_publisher<std_msgs::msg::UInt8>("/is_st_ready", rclcpp::QoS(10).transient_local());
     mission_step_pub_ = node_->create_publisher<std_msgs::msg::UInt8>("/mission_step", 10);
@@ -353,7 +353,7 @@ void UartToStm32::protocolDataHandler(uint8_t id, const std::vector<uint8_t> & d
       if (height_pub_) {
         height_pub_->publish(msg);
         RCLCPP_DEBUG_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-          "Published /height: %d", value);
+          "Published /height_raw: %d", value);
       } else {
         RCLCPP_WARN(node_->get_logger(), "Height publisher not initialized");
       }

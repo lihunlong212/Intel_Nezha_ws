@@ -145,6 +145,7 @@ private:
   // 投放参数（独立时序，不受抓取参数影响）
   double drop_altitude_cm_;                // 投放释放高度
   double drop_align_altitude_cm_;          // 投放 AprilTag 对准高度
+  double drop_servo_up_settle_sec_;       // 投放到点后舵机收起等待时间
   double drop_servo_down_duration_sec_;    // 投放时舵机下放总时长（默认 2.0s）
   double drop_magnet_off_delay_sec_;       // 投放时舵机下放后多久断开电磁铁（默认 1.0s）
 

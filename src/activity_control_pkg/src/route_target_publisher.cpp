@@ -78,6 +78,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   circle_lost_window_sec_(0.0),
   drop_altitude_cm_(0.0),
   drop_align_altitude_cm_(0.0),
+  drop_servo_up_settle_sec_(0.0),
   drop_servo_down_duration_sec_(0.0),
   drop_magnet_off_delay_sec_(0.0),
   visual_takeover_active_(false),
@@ -109,7 +110,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   visual_align_pixel_threshold_ = declare_parameter("visual_align_pixel_threshold", 100.0);
   visual_align_required_frames_ = declare_parameter("visual_align_required_frames", 3);
   visual_takeover_timeout_sec_ = declare_parameter("visual_takeover_timeout_sec", 15.0);
-  fine_data_stale_timeout_sec_ = declare_parameter("fine_data_stale_timeout_sec", 0.5);
+  fine_data_stale_timeout_sec_ = declare_parameter("fine_data_stale_timeout_sec", 0.13);
 
   // 抓取参数
   pickup_align_altitude_cm_ = declare_parameter("pickup_align_altitude_cm", 50.0);
@@ -123,8 +124,9 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   // 投放参数（独立）
   drop_altitude_cm_ = declare_parameter("drop_altitude_cm", 40.0);
   drop_align_altitude_cm_ = declare_parameter("drop_align_altitude_cm", 50.0);
+  drop_servo_up_settle_sec_ = declare_parameter("drop_servo_up_settle_sec", 1.0);
   drop_servo_down_duration_sec_ = declare_parameter("drop_servo_down_duration_sec", 2.0);
-  drop_magnet_off_delay_sec_ = declare_parameter("drop_magnet_off_delay_sec", 1.0);
+  drop_magnet_off_delay_sec_ = declare_parameter("drop_magnet_off_delay_sec", 2.0);
 
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -160,8 +162,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     rclcpp::QoS(10),
     std::bind(&RouteTargetPublisherNode::fineDataCallback, this, std::placeholders::_1));
 
-  // 必须用节点的 clock 初始化所�?rclcpp::Time 成员，否则默认构造是 RCL_SYSTEM_TIME�?
-  // �?now() 返回 RCL_ROS_TIME，相减会�?"can't subtract times with different time sources"�?
+  // 必须用节点的 clock 初始化所�?rclcpp::Time 成员，否则默认构造是 RCL_SYSTEM_TIME�?
+  // �?now() 返回 RCL_ROS_TIME，相减会�?"can't subtract times with different time sources"�?
   phase_start_time_ = now();
   visual_takeover_start_time_ = now();
   last_target_republish_time_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
@@ -200,8 +202,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     pickup_check_observe_sec_, pickup_max_attempts_);
   RCLCPP_INFO(
     get_logger(),
-    "Drop: legacy_z=%.1fcm align_z=%.1fcm servo_down=%.1fs magnet_off_delay=%.1fs",
-    drop_altitude_cm_, drop_align_altitude_cm_,
+    "Drop: legacy_z=%.1fcm align_z=%.1fcm servo_up_wait=%.1fs servo_down=%.1fs magnet_off_delay=%.1fs",
+    drop_altitude_cm_, drop_align_altitude_cm_, drop_servo_up_settle_sec_,
     drop_servo_down_duration_sec_, drop_magnet_off_delay_sec_);
 }
 
@@ -275,7 +277,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = search_approach_altitude_cm_;
       break;
     case TaskPhase::PickupAligning:
-      // 第一次对准：用航�?xy；重试时：用上一次对准成功时记录�?xy（更接近实际黑色正方形片位置�?
+      // 第一次对准：用航�?xy；重试时：用上一次对准成功时记录�?xy（更接近实际黑色正方形片位置�?
       if (has_aligned_position_) {
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
@@ -292,7 +294,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = pickup_check_altitude_cm_;
       break;
     case TaskPhase::PickupDescending:
-      // 下降：z=抓取高度；XY 仍给出对准位置作为参考，实际 XY 由视觉接管修�?
+      // 下降：z=抓取高度；XY 仍给出对准位置作为参考，实际 XY 由视觉接管修�?
       if (has_aligned_position_) {
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
@@ -308,6 +310,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = pickup_grab_altitude_cm_;
       break;
     case TaskPhase::DropArriving:
+      break;
     case TaskPhase::DropAligning:
       published_target.z_cm = drop_align_altitude_cm_;
       break;
@@ -723,23 +726,36 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
     phase == TaskPhase::PickupAligning ||
     phase == TaskPhase::PickupDescending ||
     phase == TaskPhase::PickupObserving;
+  const bool drop_visual_phase =
+    phase == TaskPhase::DropArriving ||
+    phase == TaskPhase::DropAligning;
   const bool takeover =
     search_visual_phase ||
     pickup_visual_phase ||
-    phase == TaskPhase::DropAligning;
+    drop_visual_phase;
   if (visual_takeover_active_ != takeover) {
     visual_takeover_active_ = takeover;
     publishVisualTakeoverState(takeover);
   }
 
-  if (phase == TaskPhase::DropAligning) {
+  if (phase == TaskPhase::DropArriving) {
     publishServoControl(0x00);
+    RCLCPP_INFO(
+      get_logger(),
+      "DropArriving: servo UP before descending to %.1fcm align height; waiting %.2fs",
+      drop_align_altitude_cm_, drop_servo_up_settle_sec_);
+  } else if (phase == TaskPhase::DropActing) {
+    publishServoControl(0x01);
+    RCLCPP_INFO(
+      get_logger(),
+      "DropActing: servo DOWN at t=0.00s; magnet OFF after %.2fs, servo UP after %.2fs",
+      drop_magnet_off_delay_sec_, drop_servo_down_duration_sec_);
   }
 
   uint8_t vision_mode = kVisionModeIdle;
   if (search_visual_phase || pickup_visual_phase) {
     vision_mode = kVisionModeColorSquare;
-  } else if (phase == TaskPhase::DropAligning) {
+  } else if (drop_visual_phase) {
     vision_mode = kVisionModeAprilTag;
   }
   publishVisionTargetMode(vision_mode);
@@ -750,7 +766,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   }
 
   // 进入 PickupAligning 时重置帧计数 + 视觉超时起点（重试场景必须重置）
-  if (phase == TaskPhase::PickupAligning || phase == TaskPhase::DropAligning) {
+  if (phase == TaskPhase::PickupAligning || drop_visual_phase) {
     aligned_frame_count_ = 0;
     visual_takeover_start_time_ = now_time;
     resetFineDataState();
@@ -760,7 +776,7 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
     resetFineDataState();
   }
 
-  // 下发新阶段对应的目标位置（z �?getPublishedTarget 调整�?
+  // 下发新阶段对应的目标位置（z �?getPublishedTarget 调整�?
   if (current_idx_ < targets_.size()) {
     publishTarget(getPublishedTarget(targets_[current_idx_]), false);
   }
@@ -880,7 +896,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         has_aligned_position_ = false;
         setPhase(TaskPhase::PickupAligning, now_time);
       } else if (target.type == kTargetTypeDrop) {
-        setPhase(TaskPhase::DropAligning, now_time);
+        setPhase(TaskPhase::DropArriving, now_time);
       } else if (target.type == kTargetTypeSearch) {
         if (hasPendingSearchTargetsAfterCurrent()) {
           advanceToNextTarget();
@@ -948,7 +964,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           current_idx_, phase_elapsed, pickup_attempts_ + 1, pickup_max_attempts_);
         publishElectromagnetControl(0x00);
         publishServoControl(0x00);
-        has_aligned_position_ = false;  // 超时跳过，清掉锁�?
+        has_aligned_position_ = false;  // 超时跳过，清掉锁�?
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
         return;
@@ -981,8 +997,8 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (xy_ok && height_ok) {
         ++aligned_frame_count_;
         if (aligned_frame_count_ >= visual_align_required_frames_) {
-          // 对准成功：记录此刻无人机的真�?xy，作为后续下�?上升/重试的锁位坐�?
-          // （黑色正方形片实物位置可能不在航�?xy 上，所以用真实位置代替航点坐标�?
+          // 对准成功：记录此刻无人机的真�?xy，作为后续下�?上升/重试的锁位坐�?
+          // （黑色正方形片实物位置可能不在航�?xy 上，所以用真实位置代替航点坐标�?
           aligned_x_cm_ = x_cm;
           aligned_y_cm_ = y_cm;
           has_aligned_position_ = true;
@@ -1066,7 +1082,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           std_msgs::msg::Empty empty_msg;
           pickup_done_pub_->publish(empty_msg);
         }
-        has_aligned_position_ = false;  // 抓取成功，清掉锁�?
+        has_aligned_position_ = false;  // 抓取成功，清掉锁�?
         setPhase(TaskPhase::Idle, now_time);
         advanceToNextTarget();
         return;
@@ -1085,7 +1101,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           "Pickup retry at target %zu (attempt %d/%d). Magnet stays ON, returning to aligned (%.1f, %.1f) at z=%.1f.",
           current_idx_, pickup_attempts_ + 1, pickup_max_attempts_,
           aligned_x_cm_, aligned_y_cm_, pickup_align_altitude_cm_);
-        // 重试：电磁铁保持通电；has_aligned_position_ 保持 true�?
+        // 重试：电磁铁保持通电；has_aligned_position_ 保持 true�?
         // getPublishedTarget 会用 aligned_x/y 作为目标，无人机回到上次对准位置（不是航点坐标）
         setPhase(TaskPhase::PickupAligning, now_time);
       }
@@ -1094,13 +1110,11 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
     case TaskPhase::DropArriving: {
       RCLCPP_DEBUG_THROTTLE(
-        get_logger(), *get_clock(), 1000,
-        "DropArriving %zu: target=(%.1f,%.1f,%.1f) current=(%.1f,%.1f,%.1f)",
-        current_idx_, target.x_cm, target.y_cm, drop_align_altitude_cm_, x_cm, y_cm, z_cm);
+        get_logger(), *get_clock(), 500,
+        "DropArriving %zu: servo_up_wait elapsed=%.2fs / %.2fs hold_z=%.1fcm current_z=%.1fcm",
+        current_idx_, phase_elapsed, drop_servo_up_settle_sec_, target.z_cm, z_cm);
 
-      Target drop_target = target;
-      drop_target.z_cm = drop_align_altitude_cm_;
-      if (isReached(drop_target, x_cm, y_cm, z_cm, yaw_deg)) {
+      if (phase_elapsed >= drop_servo_up_settle_sec_) {
         setPhase(TaskPhase::DropAligning, now_time);
       }
       return;
@@ -1176,7 +1190,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     }
 
     case TaskPhase::DropActing: {
-      // 时序：t=0 已发 servo=01；t=drop_magnet_off_delay �?magnet=00；t=drop_servo_down_duration �?servo=00 �?离开
+      // 时序：t=0 已发 servo=01；t=drop_magnet_off_delay �?magnet=00；t=drop_servo_down_duration �?servo=00 �?离开
       if (!magnet_sent_in_phase_ && phase_elapsed >= drop_magnet_off_delay_sec_) {
         publishElectromagnetControl(0x00);
         magnet_sent_in_phase_ = true;
@@ -1255,13 +1269,13 @@ std::vector<Target> RouteTestNode::buildRoute() const
     Target{35.0, 182.0, 80.0, 0.0, kTargetTypeSearch},
 
 
-    Target{30.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
+    Target{20.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
     Target{130.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
 
-    Target{193.0, 52.0, 120.0, 0.0, kTargetTypeDrop},
+    Target{193.0, 56.0, 120.0, 0.0, kTargetTypeDrop},
     
     Target{130.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
-    Target{30.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
+    Target{0.0, 125.0, 120.0, 0.0, kTargetTypeWaypoint},
     Target{0.0, 0.0, 120.0, 0.0, kTargetTypeWaypoint},
     Target{0.0, 0.0, kLandingAltitudeCm, 0.0, kTargetTypeWaypoint},
   };
