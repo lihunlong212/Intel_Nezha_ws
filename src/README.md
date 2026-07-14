@@ -76,9 +76,11 @@ Key file:
 
 ### `robot_action_demo`
 
-Provides the `dispatch_order` action server. When a task is accepted, it reads
-`robot_action_demo/config/task_launch_map.yaml` and starts the configured launch command.
-The default task mapping starts `my_launch demo1.launch.py`.
+Provides the robot-side fleet-order receiver. It subscribes to `/fleet/orders`,
+starts the mapped local mission, and publishes only `/fleet/device_status` and
+`/fleet/order_events`.
+It does **not** provide the `/aiagent/dispatch_order` Action Server; that server belongs
+on the remote dispatch side.
 
 ### `my_launch`
 
@@ -137,5 +139,5 @@ Current serial frame usage:
 ros2 launch pid_control_pkg position_pid_controller.launch.py
 ros2 launch uart_to_stm32 uart_to_stm32.launch.py
 ros2 launch my_launch demo1.launch.py
-ros2 run robot_action_demo dispatch_server
+ros2 run robot_action_demo dispatch_receiver
 ```

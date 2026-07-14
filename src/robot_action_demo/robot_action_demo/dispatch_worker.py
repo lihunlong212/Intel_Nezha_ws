@@ -52,6 +52,7 @@ class LocalDomainListener:
         self.pickup_failed = threading.Event()
         self.drop_done = threading.Event()
         self.drop_failed = threading.Event()
+        self.mission_complete = threading.Event()
         self._context = Context()
         self._context.init(domain_id=domain_id)
         self._node = Node("dispatch_worker_local_listener", context=self._context)
@@ -59,6 +60,7 @@ class LocalDomainListener:
         self._node.create_subscription(Empty, "/pickup_failed", self._on_pickup_failed, 10)
         self._node.create_subscription(Empty, "/drop_done", self._on_drop, 10)
         self._node.create_subscription(Empty, "/drop_failed", self._on_drop_failed, 10)
+        self._node.create_subscription(Empty, "/mission_complete", self._on_mission_complete, 10)
         self._executor = SingleThreadedExecutor(context=self._context)
         self._executor.add_node(self._node)
         self._thread = threading.Thread(target=self._spin, daemon=True)
@@ -86,6 +88,10 @@ class LocalDomainListener:
     def _on_drop_failed(self, _msg: Empty) -> None:
         self._logger.error("received /drop_failed from local domain")
         self.drop_failed.set()
+
+    def _on_mission_complete(self, _msg: Empty) -> None:
+        self._logger.info("received /mission_complete from local domain")
+        self.mission_complete.set()
 
     def shutdown(self) -> None:
         try:

@@ -16,14 +16,12 @@ from types import SimpleNamespace
 import rclpy
 import yaml
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
 from robot_action_demo.dispatch_worker import LaunchTask, LocalDomainListener, LocalTelemetryListener
-from robot_task_interfaces.action import DispatchOrder
 
 
 PACKAGE_NAME = "robot_action_demo"
@@ -36,37 +34,26 @@ DRONE2_START_FRAME = b"\xAA\x01\x01\xFF"
 DRONE2_ONLINE_FRAME = b"\xAA\xFF"
 DRONE2_DONE_FRAME = b"\xBB\xFF"
 DRONE2_COMMAND_PERIOD_SEC = 5.0
-DRONE2_ONLINE_TIMEOUT_SEC = 5.0
 DRONE2_FEEDBACK_PERIOD_SEC = 1.0
 FLEET_DEVICE_STATUS_TOPIC = "/fleet/device_status"
-FLEET_DEVICE_DIAGNOSTICS_TOPIC = "/fleet/device_diagnostics"
 FLEET_ORDERS_TOPIC = "/fleet/orders"
 FLEET_ORDER_EVENTS_TOPIC = "/fleet/order_events"
 
 
-class FleetOrderGoalHandle:
-    """Minimal Action-like handle used for a fleet order received as JSON."""
+class FleetOrderContext:
+    """Task context for an order received from /fleet/orders."""
 
-    def __init__(self, order: dict[str, object]) -> None:
+    def __init__(self, order: dict[str, object], cancel_event: threading.Event) -> None:
         self.request = SimpleNamespace(
             task_id=str(order.get("task_id") or ""),
             device_id=str(order.get("device_id") or ""),
             item=str(order.get("item") or ""),
         )
+        self._cancel_event = cancel_event
 
     @property
     def is_cancel_requested(self) -> bool:
-        return False
-
-    def succeed(self) -> None:
-        pass
-
-    def abort(self) -> None:
-        pass
-
-    def canceled(self) -> None:
-        pass
-
+        return self._cancel_event.is_set()
 
 class Drone2SerialBridge:
     """Always-on raw serial bridge between drone1 and drone2."""
@@ -81,6 +68,8 @@ class Drone2SerialBridge:
         self._delivery_done_event = threading.Event()
         self._rx_buffer = bytearray()
         self._last_online_time: float | None = None
+        self._online_frame_count = 0
+        self._available_latched = False
         self._last_error = ""
         self._next_open_warning_time = 0.0
         self._reader_thread = threading.Thread(
@@ -114,19 +103,22 @@ class Drone2SerialBridge:
 
     def is_online(self, now: float | None = None) -> bool:
         status = self.status(now)
-        return bool(status["drone2_online"])
+        return bool(status["available"])
 
     def status(self, now: float | None = None) -> dict[str, object]:
         if now is None:
             now = time.monotonic()
         with self._lock:
             last_seen = self._last_online_time
+            online_frame_count = self._online_frame_count
+            available = self._available_latched
             last_error = self._last_error
             is_open = self._fd is not None
         age = None if last_seen is None else max(0.0, now - last_seen)
         return {
             "device_id": DRONE2_DEVICE_ID,
-            "drone2_online": age is not None and age <= DRONE2_ONLINE_TIMEOUT_SEC,
+            "available": available,
+            "online_frame_count": online_frame_count,
             "last_seen_age_sec": None if age is None else round(age, 3),
             "serial_open": is_open,
             "serial_error": last_error,
@@ -193,7 +185,14 @@ class Drone2SerialBridge:
                     del self._rx_buffer[:pos]
                 if self._rx_buffer.startswith(DRONE2_ONLINE_FRAME):
                     self._last_online_time = time.monotonic()
-                    self._logger.info("received drone2 online frame: AA FF")
+                    self._online_frame_count += 1
+                    if self._online_frame_count >= 3 and not self._available_latched:
+                        self._available_latched = True
+                        self._logger.info("drone2 available after receiving 3 AA FF frames")
+                    self._logger.info(
+                        f"received drone2 online frame: AA FF "
+                        f"(count={self._online_frame_count})"
+                    )
                     del self._rx_buffer[: len(DRONE2_ONLINE_FRAME)]
                     continue
                 if self._rx_buffer.startswith(DRONE2_DONE_FRAME):
@@ -277,11 +276,11 @@ class Drone2SerialBridge:
         return " ".join(f"{byte:02X}" for byte in data)
 
 
-class DispatchServer(Node):
-    """Single-command dispatch server: accept action goals and start the local mission launch."""
+class DispatchReceiver(Node):
+    """Robot-side fleet order receiver; it never provides an Action Server."""
 
     def __init__(self) -> None:
-        super().__init__("dispatch_server")
+        super().__init__("dispatch_receiver")
         self._target_domain_id, self._tasks = self._load_config()
         self._callback_group = ReentrantCallbackGroup()
         self._state_lock = threading.RLock()
@@ -291,9 +290,10 @@ class DispatchServer(Node):
         self._local_telemetry: LocalTelemetryListener | None = None
         self._active_drone2_task_id: str | None = None
         self._drone2_delivery_started_task_id: str | None = None
+        self._drone2_task_state = "IDLE"
+        self._order_cancel_events: dict[tuple[str, str], threading.Event] = {}
         self._drone2_bridge = Drone2SerialBridge(self.get_logger())
         self._device_status_pub = self.create_publisher(String, FLEET_DEVICE_STATUS_TOPIC, 10)
-        self._device_diagnostics_pub = self.create_publisher(String, FLEET_DEVICE_DIAGNOSTICS_TOPIC, 10)
         self._fleet_event_pub = self.create_publisher(String, FLEET_ORDER_EVENTS_TOPIC, 50)
         self._fleet_order_sub = self.create_subscription(
             String,
@@ -307,43 +307,17 @@ class DispatchServer(Node):
             self._publish_device_status,
             callback_group=self._callback_group,
         )
-        self._server = ActionServer(
-            self,
-            DispatchOrder,
-            "/dispatch_order",
-            self.execute_callback,
-            callback_group=self._callback_group,
-            goal_callback=self.goal_callback,
-            cancel_callback=self.cancel_callback,
-        )
-        self.get_logger().info("dispatch server ready: /dispatch_order")
+        self._publish_feedback(LOCAL_DEVICE_ID, "", "IDLE")
+        self._publish_feedback(DRONE2_DEVICE_ID, "", "IDLE")
+        self.get_logger().info("dispatch receiver ready; no Action Server is registered")
         self.get_logger().info(
             f"local launch domain={self._target_domain_id}, configured tasks={sorted(self._tasks.keys())}"
         )
         self.get_logger().info(
-            f"publishing drone1/drone2 status on {FLEET_DEVICE_STATUS_TOPIC} and diagnostics on "
-            f"{FLEET_DEVICE_DIAGNOSTICS_TOPIC}"
+            f"publishing drone1/drone2 status on {FLEET_DEVICE_STATUS_TOPIC} and task states on "
+            f"{FLEET_ORDER_EVENTS_TOPIC}"
         )
         self.get_logger().info(f"listening for fleet orders on {FLEET_ORDERS_TOPIC}")
-
-    def goal_callback(self, goal_request: DispatchOrder.Goal) -> GoalResponse:
-        device_id = self._normalize_device_id(goal_request.device_id)
-        self.get_logger().info(
-            f"received goal task_id={goal_request.task_id} device_id={device_id} item={goal_request.item}"
-        )
-        if not goal_request.task_id:
-            self.get_logger().warning("rejecting goal without task_id")
-            return GoalResponse.REJECT
-        if device_id not in {LOCAL_DEVICE_ID, DRONE2_DEVICE_ID}:
-            self.get_logger().warning(f"rejecting goal for unsupported device_id={goal_request.device_id!r}")
-            return GoalResponse.REJECT
-        if device_id == LOCAL_DEVICE_ID and self._local_task_running():
-            self.get_logger().warning("rejecting drone1 goal because local mission launch is already running")
-            return GoalResponse.REJECT
-        return GoalResponse.ACCEPT
-
-    def cancel_callback(self, _cancel_request) -> CancelResponse:
-        return CancelResponse.ACCEPT
 
     def _on_fleet_order(self, msg: String) -> None:
         try:
@@ -351,11 +325,18 @@ class DispatchServer(Node):
         except json.JSONDecodeError as exc:
             self.get_logger().warning(f"invalid fleet order JSON: {exc}")
             return
-        if not isinstance(order, dict) or order.get("event") != "order":
+        if not isinstance(order, dict):
             return
 
+        event = str(order.get("event") or "")
         device_id = self._normalize_device_id(str(order.get("device_id") or ""))
         if device_id not in {LOCAL_DEVICE_ID, DRONE2_DEVICE_ID}:
+            return
+
+        if event in {"cancel", "session_reset"}:
+            self._request_cancel(device_id, str(order.get("task_id") or ""))
+            return
+        if event != "order":
             return
 
         task_id = str(order.get("task_id") or "")
@@ -365,61 +346,59 @@ class DispatchServer(Node):
         self.get_logger().info(
             f"received fleet order task_id={task_id} device_id={device_id} item={order.get('item') or ''}"
         )
+        cancel_event = threading.Event()
+        with self._state_lock:
+            self._order_cancel_events[(device_id, task_id)] = cancel_event
         threading.Thread(
             target=self._execute_fleet_order,
-            args=(order, device_id),
+            args=(order, device_id, cancel_event),
             name=f"fleet_order_{task_id}",
             daemon=True,
         ).start()
 
-    def _execute_fleet_order(self, order: dict[str, object], device_id: str) -> None:
-        goal_handle = FleetOrderGoalHandle(order)
-        if device_id == DRONE2_DEVICE_ID:
-            result = self._execute_drone2_task(goal_handle)
-        else:
-            result = self._execute_local_task(goal_handle)
-        event = {
-            "event": "result",
-            "task_id": result.task_id,
-            "device_id": device_id,
-            "device_type": "drone",
-            "success": result.success,
-            "final_state": result.final_state,
-            "detail": result.detail,
-        }
-        msg = String()
-        msg.data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
-        self._fleet_event_pub.publish(msg)
+    def _execute_fleet_order(
+        self,
+        order: dict[str, object],
+        device_id: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        task_id = str(order["task_id"])
+        try:
+            goal_handle = FleetOrderContext(order, cancel_event)
+            if device_id == DRONE2_DEVICE_ID:
+                result = self._execute_drone2_task(goal_handle)
+            else:
+                result = self._execute_local_task(goal_handle)
+            self._publish_order_event({
+                "event": "result",
+                "task_id": result.task_id,
+                "device_id": device_id,
+                "device_type": "drone",
+                "success": result.success,
+                "final_state": result.final_state,
+                "detail": result.detail,
+            })
+            if self._device_is_idle(device_id):
+                self._publish_feedback(device_id, "", "IDLE")
+        finally:
+            with self._state_lock:
+                key = (device_id, task_id)
+                if self._order_cancel_events.get(key) is cancel_event:
+                    self._order_cancel_events.pop(key, None)
 
-    def execute_callback(self, goal_handle) -> DispatchOrder.Result:
-        goal = goal_handle.request
-        device_id = self._normalize_device_id(goal.device_id)
-        if device_id == DRONE2_DEVICE_ID:
-            return self._execute_drone2_task(goal_handle)
-        if device_id == LOCAL_DEVICE_ID:
-            return self._execute_local_task(goal_handle)
-        goal_handle.abort()
-        return self._make_result(
-            goal.task_id,
-            False,
-            "UNSUPPORTED_DEVICE",
-            f"unsupported device_id={goal.device_id}",
-        )
-
-    def _execute_local_task(self, goal_handle) -> DispatchOrder.Result:
+    def _execute_local_task(self, goal_handle) -> SimpleNamespace:
         goal = goal_handle.request
         if not self._reserve_local_task(goal.task_id):
-            goal_handle.abort()
             return self._make_result(
                 goal.task_id,
                 False,
                 "LOCAL_BUSY",
                 "drone1 is already running a mission",
             )
+        self._publish_feedback(LOCAL_DEVICE_ID, goal.task_id, "PICKING_UP")
 
         task = self._select_task(goal.item)
         if task is None:
-            goal_handle.abort()
             self._release_local_task(goal.task_id)
             return self._make_result(
                 goal.task_id,
@@ -431,11 +410,12 @@ class DispatchServer(Node):
         listener: LocalDomainListener | None = None
         telemetry: LocalTelemetryListener | None = None
         proc: subprocess.Popen | None = None
+        drop_completed = False
         try:
             telemetry = LocalTelemetryListener(
                 self.get_logger(), int(self._target_domain_id), "map", "laser_link"
             )
-            self._set_local_task_status(goal.task_id, "LAUNCHING", telemetry)
+            self._set_local_task_status(goal.task_id, "PICKING_UP", telemetry)
             listener = LocalDomainListener(self.get_logger(), int(self._target_domain_id))
             proc = self._start_launch_subprocess(task)
             with self._state_lock:
@@ -445,26 +425,44 @@ class DispatchServer(Node):
             while rclpy.ok():
                 if goal_handle.is_cancel_requested:
                     self._stop_subprocess(proc)
-                    goal_handle.canceled()
                     return self._make_result(goal.task_id, False, "CANCELED", "task canceled")
 
-                if listener.drop_done.is_set():
+                if listener.drop_done.is_set() and not drop_completed:
+                    # /drop_done only means the cargo was released.  The configured
+                    # route still contains return-and-land waypoints; do not tear down
+                    # PID/UART control while the aircraft is airborne.
+                    self._mark_local_delivered(goal.task_id)
+                    self._publish_feedback(LOCAL_DEVICE_ID, goal.task_id, "DELIVERED")
+                    drop_completed = True
+
+                if listener.mission_complete.is_set():
+                    # Let uart_to_stm32 consume /mission_complete and send its three
+                    # serial stop/complete frames before ending the launch process.
+                    time.sleep(1.0)
                     self._stop_subprocess(proc)
-                    goal_handle.succeed()
-                    return self._make_result(goal.task_id, True, "SUCCEEDED", "drop completed")
+                    if drop_completed:
+                        return self._make_result(
+                            goal.task_id,
+                            True,
+                            "SUCCEEDED",
+                            "drop completed; return and landing completed",
+                        )
+                    return self._make_result(
+                        goal.task_id,
+                        False,
+                        "MISSION_COMPLETED_WITHOUT_DROP",
+                        "mission completed before a drop event was received",
+                    )
 
                 if listener.pickup_failed.is_set():
                     self._stop_subprocess(proc)
-                    goal_handle.abort()
                     return self._make_result(goal.task_id, False, "PICKUP_FAILED", "pickup failed")
 
                 if listener.drop_failed.is_set():
                     self._stop_subprocess(proc)
-                    goal_handle.abort()
                     return self._make_result(goal.task_id, False, "DROP_FAILED", "drop failed")
 
                 if proc.poll() is not None:
-                    goal_handle.abort()
                     return self._make_result(
                         goal.task_id,
                         False,
@@ -472,15 +470,19 @@ class DispatchServer(Node):
                         f"launch exited with code {proc.returncode}",
                     )
 
+                if drop_completed:
+                    time.sleep(1.0)
+                    continue
                 if listener.pickup_done.is_set():
-                    self._set_local_task_state(goal.task_id, "DELIVERING")
+                    if self._set_local_task_state(goal.task_id, "DELIVERING"):
+                        self._publish_feedback(LOCAL_DEVICE_ID, goal.task_id, "DELIVERING")
                 else:
-                    self._set_local_task_state(goal.task_id, "PICKING_UP")
+                    if self._set_local_task_state(goal.task_id, "PICKING_UP"):
+                        self._publish_feedback(LOCAL_DEVICE_ID, goal.task_id, "PICKING_UP")
                 time.sleep(1.0)
         except Exception as exc:
             if proc is not None and proc.poll() is None:
                 self._stop_subprocess(proc)
-            goal_handle.abort()
             return self._make_result(goal.task_id, False, "SERVER_ERROR", str(exc))
         finally:
             self._release_local_task(goal.task_id)
@@ -492,13 +494,11 @@ class DispatchServer(Node):
                 if self._active_process is proc:
                     self._active_process = None
 
-        goal_handle.abort()
         return self._make_result(goal.task_id, False, "ROS_SHUTDOWN", "rclpy stopped")
 
-    def _execute_drone2_task(self, goal_handle) -> DispatchOrder.Result:
+    def _execute_drone2_task(self, goal_handle) -> SimpleNamespace:
         goal = goal_handle.request
         if not self._reserve_drone2_task(goal.task_id):
-            goal_handle.abort()
             return self._make_result(
                 goal.task_id,
                 False,
@@ -509,7 +509,6 @@ class DispatchServer(Node):
         self._drone2_bridge.reset_delivery_done()
         try:
             if not self._drone2_bridge.send_start_command():
-                goal_handle.abort()
                 return self._make_result(
                     goal.task_id,
                     False,
@@ -517,6 +516,7 @@ class DispatchServer(Node):
                     self._json_detail(goal.task_id, "SERIAL_ERROR", self._drone2_bridge.status()),
                 )
             self._mark_drone2_delivery_started(goal.task_id)
+            self._publish_feedback(DRONE2_DEVICE_ID, goal.task_id, "DELIVERING")
             self.get_logger().info("sent drone2 start frame: AA 01 01 FF")
 
             start_time = time.monotonic()
@@ -524,7 +524,6 @@ class DispatchServer(Node):
             while rclpy.ok():
                 now = time.monotonic()
                 if goal_handle.is_cancel_requested:
-                    goal_handle.canceled()
                     return self._make_result(
                         goal.task_id,
                         False,
@@ -534,7 +533,6 @@ class DispatchServer(Node):
 
                 if now >= next_command_time:
                     if not self._drone2_bridge.send_start_command():
-                        goal_handle.abort()
                         return self._make_result(
                             goal.task_id,
                             False,
@@ -545,17 +543,17 @@ class DispatchServer(Node):
                     next_command_time = now + DRONE2_COMMAND_PERIOD_SEC
 
                 if self._drone2_bridge.delivery_done():
-                    goal_handle.succeed()
+                    self._mark_drone2_delivered(goal.task_id)
+                    self._publish_feedback(DRONE2_DEVICE_ID, goal.task_id, "DELIVERED")
                     return self._make_result(
                         goal.task_id,
                         True,
-                        "DRONE2_SUCCEEDED",
+                        "SUCCEEDED",
                         self._json_detail(goal.task_id, "COMPLETED", self._drone2_bridge.status(now)),
                     )
 
                 time.sleep(DRONE2_FEEDBACK_PERIOD_SEC)
         except Exception as exc:
-            goal_handle.abort()
             return self._make_result(
                 goal.task_id,
                 False,
@@ -565,7 +563,6 @@ class DispatchServer(Node):
         finally:
             self._release_drone2_task(goal.task_id)
 
-        goal_handle.abort()
         return self._make_result(
             goal.task_id,
             False,
@@ -637,6 +634,7 @@ class DispatchServer(Node):
             ):
                 return False
             self._active_local_task_id = task_id
+            self._local_task_state = "PICKING_UP"
             return True
 
     def _release_local_task(self, task_id: str) -> None:
@@ -654,22 +652,31 @@ class DispatchServer(Node):
                 self._local_task_state = current_state
                 self._local_telemetry = telemetry
 
-    def _set_local_task_state(self, task_id: str, current_state: str) -> None:
+    def _set_local_task_state(self, task_id: str, current_state: str) -> bool:
         with self._state_lock:
             if self._active_local_task_id == task_id:
+                if self._local_task_state == current_state:
+                    return False
                 self._local_task_state = current_state
+                return True
+        return False
+
+    def _mark_local_delivered(self, task_id: str) -> None:
+        self._set_local_task_state(task_id, "DELIVERED")
 
     def _reserve_drone2_task(self, task_id: str) -> bool:
         with self._state_lock:
             if self._active_drone2_task_id is not None:
                 return False
             self._active_drone2_task_id = task_id
+            self._drone2_task_state = "IDLE"
             return True
 
     def _release_drone2_task(self, task_id: str) -> None:
         with self._state_lock:
             if self._active_drone2_task_id == task_id:
                 self._active_drone2_task_id = None
+                self._drone2_task_state = "IDLE"
             if self._drone2_delivery_started_task_id == task_id:
                 self._drone2_delivery_started_task_id = None
 
@@ -677,15 +684,18 @@ class DispatchServer(Node):
         with self._state_lock:
             if self._active_drone2_task_id == task_id:
                 self._drone2_delivery_started_task_id = task_id
+                self._drone2_task_state = "DELIVERING"
+
+    def _mark_drone2_delivered(self, task_id: str) -> None:
+        with self._state_lock:
+            if self._active_drone2_task_id == task_id:
+                self._drone2_task_state = "DELIVERED"
 
     def _publish_device_status(self) -> None:
         now = time.monotonic()
         status = self._drone2_bridge.status(now)
         with self._state_lock:
-            local_task_id = self._active_local_task_id or ""
-            local_state = self._local_task_state
             local_telemetry = self._local_telemetry
-            drone2_task_id = self._drone2_delivery_started_task_id or ""
         local_position = (
             local_telemetry.get_position_cm() if local_telemetry is not None else None
         )
@@ -693,55 +703,25 @@ class DispatchServer(Node):
         drone1_payload = {
             "device_id": LOCAL_DEVICE_ID,
             "device_type": "drone",
-            "healthy": True,
-            "online": True,
             "available": True,
-            "working": bool(local_task_id),
-            "active_task_id": local_task_id,
-            "current_state": local_state,
             "position_frame": "map",
             "coordinate_unit": "cm",
             "x_cm": None if local_position is None else local_position["x"],
             "y_cm": None if local_position is None else local_position["y"],
+            "z_cm": None if local_position is None else local_position["z"],
         }
         drone1_msg = String()
         drone1_msg.data = json.dumps(drone1_payload, ensure_ascii=False, separators=(",", ":"))
         self._device_status_pub.publish(drone1_msg)
 
-        online = bool(status["drone2_online"])
-        working = bool(drone2_task_id)
-
         status_payload = {
             "device_id": DRONE2_DEVICE_ID,
             "device_type": "drone",
-            "healthy": online,
-            "online": online,
-            "available": online,
-            "working": working,
-            "active_task_id": drone2_task_id,
-            "drone2_online": online,
-            "current_state": "DELIVERING" if working else "IDLE",
-            "delivery_state": "DELIVERING" if working else "IDLE",
-            "last_seen_age_sec": status["last_seen_age_sec"],
-            "serial_open": status["serial_open"],
-            "serial_error": status["serial_error"],
+            "available": bool(status["available"]),
         }
         status_msg = String()
         status_msg.data = json.dumps(status_payload, ensure_ascii=False, separators=(",", ":"))
         self._device_status_pub.publish(status_msg)
-
-        diagnostics_payload = {
-            "device_id": DRONE2_DEVICE_ID,
-            "device_type": "drone",
-            "online_frame": "AA FF",
-            "done_frame": "BB FF",
-            "start_frame": "AA 01 01 FF",
-            "online_timeout_sec": DRONE2_ONLINE_TIMEOUT_SEC,
-            **status,
-        }
-        diagnostics_msg = String()
-        diagnostics_msg.data = json.dumps(diagnostics_payload, ensure_ascii=False, separators=(",", ":"))
-        self._device_diagnostics_pub.publish(diagnostics_msg)
 
     @staticmethod
     def _json_detail(
@@ -794,18 +774,67 @@ class DispatchServer(Node):
         success: bool,
         final_state: str,
         detail: str,
-    ) -> DispatchOrder.Result:
-        result = DispatchOrder.Result()
-        result.success = success
-        result.task_id = task_id
-        result.final_state = final_state
-        result.detail = detail
-        return result
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            success=success,
+            task_id=task_id,
+            final_state=final_state,
+            detail=detail,
+        )
+
+    def _device_is_idle(self, device_id: str) -> bool:
+        with self._state_lock:
+            if device_id == LOCAL_DEVICE_ID:
+                return self._active_local_task_id is None
+            return self._active_drone2_task_id is None
+
+    def _publish_feedback(self, device_id: str, task_id: str, current_state: str) -> None:
+        state_text, progress, detail = self._feedback_fields(device_id, current_state)
+        self._publish_order_event(
+            {
+                "event": "feedback",
+                "task_id": task_id,
+                "device_id": device_id,
+                "device_type": "drone",
+                "current_state": state_text,
+                "progress": progress,
+                "detail": detail,
+            }
+        )
+
+    @staticmethod
+    def _feedback_fields(device_id: str, current_state: str) -> tuple[str, float, str]:
+        if current_state == "IDLE":
+            return "空闲", 0.0, f"{device_id} 空闲"
+        if current_state == "PICKING_UP":
+            return "取货中", 0.2, f"{device_id} 正在取货"
+        if current_state == "DELIVERING":
+            progress = 0.7 if device_id == LOCAL_DEVICE_ID else 0.5
+            return "送货中", progress, f"{device_id} 正在送货"
+        if current_state == "DELIVERED":
+            return "送货成功", 1.0, f"{device_id} 已完成投货"
+        return current_state, 0.0, current_state
+
+    def _request_cancel(self, device_id: str, task_id: str) -> None:
+        with self._state_lock:
+            if task_id:
+                cancel_event = self._order_cancel_events.get((device_id, task_id))
+                if cancel_event is not None:
+                    cancel_event.set()
+                return
+            for (active_device_id, _), cancel_event in self._order_cancel_events.items():
+                if active_device_id == device_id:
+                    cancel_event.set()
+
+    def _publish_order_event(self, payload: dict[str, object]) -> None:
+        msg = String()
+        msg.data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        self._fleet_event_pub.publish(msg)
 
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = DispatchServer()
+    node = DispatchReceiver()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:

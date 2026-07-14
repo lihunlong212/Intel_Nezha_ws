@@ -15,15 +15,13 @@ setup(
     zip_safe=True,
     maintainer="miao",
     maintainer_email="miao@miao.com",
-    description="Minimal ROS 2 action server/client demo for robot dispatch.",
+    description="ROS 2 fleet-order receiver and device worker for robot dispatch.",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
+            "dispatch_receiver = robot_action_demo.dispatch_server:main",
             "dispatch_server = robot_action_demo.dispatch_server:main",
-            "dispatch_client = robot_action_demo.dispatch_client:main",
-            "dispatch_topic_hub_server = robot_action_demo.dispatch_topic_hub_server:main",
-            "dispatch_worker = robot_action_demo.dispatch_worker:main",
         ],
     },
 )

@@ -111,6 +111,7 @@ class GroundHeightNode : public rclcpp::Node {
     declare_parameter<std::string>("uart_height_topic", "/height_raw");
     declare_parameter<double>("uart_height_bias_cm", 5.0);
     declare_parameter<double>("uart_height_timeout_sec", 0.30);
+    declare_parameter<double>("uart_height_max_m", 5.0);
     declare_parameter<double>("uart_block_margin_cm", 8.0);
     declare_parameter<double>("uart_geometry_consistency_cm", 8.0);
     declare_parameter<double>("uart_blend_weight", 0.35);
@@ -151,6 +152,7 @@ class GroundHeightNode : public rclcpp::Node {
     get_parameter("uart_height_topic", uart_height_topic_);
     get_parameter("uart_height_bias_cm", uart_height_bias_cm_);
     get_parameter("uart_height_timeout_sec", uart_height_timeout_sec_);
+    get_parameter("uart_height_max_m", uart_height_max_m_);
     get_parameter("uart_block_margin_cm", uart_block_margin_cm_);
     get_parameter("uart_geometry_consistency_cm", uart_geometry_consistency_cm_);
     get_parameter("uart_blend_weight", uart_blend_weight_);
@@ -167,6 +169,7 @@ class GroundHeightNode : public rclcpp::Node {
     beam_cols_ = std::max(1, beam_cols_);
     geometry_min_support_ = std::max(1, geometry_min_support_);
     uart_height_timeout_sec_ = std::max(0.05, uart_height_timeout_sec_);
+    uart_height_max_m_ = std::max(0.1, uart_height_max_m_);
     uart_block_margin_cm_ = std::max(0.0, uart_block_margin_cm_);
     uart_geometry_consistency_cm_ = std::max(0.0, uart_geometry_consistency_cm_);
     uart_blend_weight_ = std::clamp(uart_blend_weight_, 0.0, 1.0);
@@ -302,6 +305,7 @@ class GroundHeightNode : public rclcpp::Node {
   std::string uart_height_topic_{"/height_raw"};
   double uart_height_bias_cm_{5.0};
   double uart_height_timeout_sec_{0.30};
+  double uart_height_max_m_{5.0};
   double uart_block_margin_cm_{8.0};
   double uart_geometry_consistency_cm_{8.0};
   double uart_blend_weight_{0.35};
@@ -364,8 +368,14 @@ class GroundHeightNode : public rclcpp::Node {
 
     const float raw_height_m = static_cast<float>(msg->data) / 100.0f;
     std::lock_guard<std::mutex> lk(uart_mtx_);
-    if (!std::isfinite(raw_height_m) || raw_height_m <= 0.0f) {
+    if (!std::isfinite(raw_height_m) || raw_height_m <= 0.0f ||
+      raw_height_m > static_cast<float>(uart_height_max_m_))
+    {
       have_uart_height_ = false;
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Rejecting invalid UART height %.3fm (valid range: 0..%.3fm).",
+        raw_height_m, uart_height_max_m_);
       return;
     }
 

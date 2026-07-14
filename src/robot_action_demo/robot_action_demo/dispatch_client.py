@@ -11,10 +11,13 @@ from rclpy.node import Node
 from robot_task_interfaces.action import DispatchOrder
 
 
+AIAGENT_DISPATCH_ACTION = "/aiagent/dispatch_order"
+
+
 class DispatchActionClient(Node):
     def __init__(self) -> None:
         super().__init__("dispatch_action_client")
-        self._client = ActionClient(self, DispatchOrder, "/dispatch_order")
+        self._client = ActionClient(self, DispatchOrder, AIAGENT_DISPATCH_ACTION)
         self._goal_done = False
         self._result = None
 
@@ -33,7 +36,7 @@ class DispatchActionClient(Node):
         goal_msg.final_dst_location = args.final_dst_location
         goal_msg.plan = args.plan
 
-        self.get_logger().info("waiting for /dispatch_order action server...")
+        self.get_logger().info(f"waiting for {AIAGENT_DISPATCH_ACTION} action server...")
         self._client.wait_for_server()
         self.get_logger().info(
             (

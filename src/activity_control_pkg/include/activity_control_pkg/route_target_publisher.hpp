@@ -41,10 +41,11 @@ enum class TaskPhase
   PickupHolding,     // 抓取：在抓取高度悬停一段时间，让磁铁吸住货物
   PickupAscending,   // 抓取：servo=00 已发，上升回 50cm（电磁铁仍通电吸住货物）
   PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑色正方形片来判定成败
-  DropArriving,      // 投放：飞到 (x,y,40cm)
-  DropAligning,      // 投放：在 40cm 使用 AprilTag 视觉对准
-  DropDescending,    // 投放：AprilTag 对准后下降到投放高度
-  DropActing         // 投放：servo=01 已发，2s 内发 magnet=00 释放，结束发 servo=00
+  DropArriving,      // 投放：到点后收舵机，等待后下降到对准高度
+  DropAligning,      // 投放：在对准高度使用 AprilTag 视觉对准
+  DropServoSettling, // 投放：舵机下放后在对准高度等待
+  DropDescending,    // 投放：锁定 XY 速度后下降到投放高度
+  DropActing         // 投放：立即断磁铁，等待后收起舵机
 };
 
 class RouteTargetPublisherNode : public rclcpp::Node
@@ -67,6 +68,7 @@ private:
 
   void monitorTimerCallback();
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
+  void targetVelocityCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
   void advanceToNextTarget();
   void startDropFailureReturn(const rclcpp::Time & now_time, double landing_yaw_deg);
@@ -78,6 +80,7 @@ private:
   void resetFineDataState();
   void publishIdleVisionModeForCurrentTarget();
   void publishVisualTakeoverState(bool active);
+  void publishXyVelocityHoldState(bool active);
   void publishVisionTargetMode(uint8_t mode);
   void publishServoControl(uint8_t state);
   void publishElectromagnetControl(uint8_t state);
@@ -90,6 +93,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr target_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr active_controller_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr visual_takeover_active_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr xy_velocity_hold_active_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr vision_target_mode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr servo_control_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr electromagnet_control_pub_;
@@ -99,6 +103,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr drop_done_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr drop_failed_pub_;
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_sub_;
   rclcpp::TimerBase::SharedPtr monitor_timer_;
 
@@ -111,6 +116,7 @@ private:
 
   bool has_height_;
   double current_height_cm_;
+  double latest_raw_height_cm_;
   double height_filter_jump_threshold_cm_;
   int height_filter_required_frames_;
   bool has_height_filter_candidate_;
@@ -120,6 +126,9 @@ private:
   double pos_tol_cm_;
   double yaw_tol_deg_;
   double height_tol_cm_;
+  double emergency_retract_height_threshold_cm_;
+  double emergency_retract_z_velocity_threshold_cm_s_;
+  bool emergency_servo_retract_active_;
 
   std::string map_frame_;
   std::string laser_link_frame_;
@@ -146,11 +155,12 @@ private:
   double drop_altitude_cm_;                // 投放释放高度
   double drop_align_altitude_cm_;          // 投放 AprilTag 对准高度
   double drop_servo_up_settle_sec_;       // 投放到点后舵机收起等待时间
-  double drop_servo_down_duration_sec_;    // 投放时舵机下放总时长（默认 2.0s）
-  double drop_magnet_off_delay_sec_;       // 投放时舵机下放后多久断开电磁铁（默认 1.0s）
+  double drop_servo_down_settle_sec_;     // 投放对准后舵机下放等待时间
+  double drop_servo_retract_delay_sec_;   // 断磁铁后收起舵机延迟
 
   // 视觉接管 / fine_data 状态
   bool visual_takeover_active_;
+  bool xy_velocity_hold_active_;
   bool has_fine_data_;
   bool pickup_observed_fine_data_;
   int fine_error_x_px_;
@@ -186,10 +196,18 @@ public:
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
-  std::vector<Target> buildRoute() const;
+  void detectedPillarsCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
+  void publishPillarDetectionValid(bool valid);
+  std::vector<Target> buildRoute(double transit_y_cm) const;
   void loadRoute(const std::vector<Target> & route);
 
   std::shared_ptr<RouteTargetPublisherNode> route_node_;
+  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr detected_pillars_sub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pillar_detection_valid_pub_;
+  std::mutex route_load_mutex_;
+  bool use_pillar_detection_ = true;
+  double default_transit_y_cm_ = 125.0;
+  bool route_loaded_ = false;
 };
 
 }  // namespace activity_control_pkg

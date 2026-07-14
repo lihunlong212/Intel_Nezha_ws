@@ -18,6 +18,7 @@ from robot_task_interfaces.action import DispatchOrder
 
 ORDERS_TOPIC = "/fleet/orders"
 EVENTS_TOPIC = "/fleet/order_events"
+AIAGENT_DISPATCH_ACTION = "/aiagent/dispatch_order"
 
 
 class GoalContext:
@@ -45,14 +46,14 @@ class DispatchTopicHubServer(Node):
         self._server = ActionServer(
             self,
             DispatchOrder,
-            "/dispatch_order",
+            AIAGENT_DISPATCH_ACTION,
             self.execute_callback,
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
             callback_group=self._callback_group,
         )
         self._timeout_sec = float(self.declare_parameter("result_timeout_sec", 600.0).value)
-        self.get_logger().info("dispatch topic hub ready: /dispatch_order")
+        self.get_logger().info(f"dispatch topic hub ready: {AIAGENT_DISPATCH_ACTION}")
         self.get_logger().info(f"orders={ORDERS_TOPIC}, events={EVENTS_TOPIC}")
 
     def goal_callback(self, goal_request: DispatchOrder.Goal) -> GoalResponse:

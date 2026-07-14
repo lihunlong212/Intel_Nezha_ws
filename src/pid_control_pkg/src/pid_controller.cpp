@@ -132,6 +132,7 @@ PositionPIDController::PositionPIDController()
   current_yaw_deg_(0.0),
   current_z_cm_(0.0),
   control_frequency_(50.0),
+  pose_data_timeout_sec_(0.5),
   map_frame_("map"),
   laser_link_frame_("laser_link"),
   max_linear_vel_(36.0),
@@ -152,6 +153,8 @@ PositionPIDController::PositionPIDController()
   error_yaw_deg_(0.0),
   error_z_cm_(0.0),
   visual_takeover_active_(false),
+  xy_velocity_hold_active_(false),
+  pillar_detection_valid_(false),
   has_visual_fine_data_(false),
   visual_error_x_px_(0.0),
   visual_error_y_px_(0.0),
@@ -178,6 +181,12 @@ PositionPIDController::PositionPIDController()
   visual_takeover_sub_ = create_subscription<std_msgs::msg::Bool>(
     "/visual_takeover_active", takeover_qos,
     std::bind(&PositionPIDController::visualTakeoverCallback, this, std::placeholders::_1));
+  xy_velocity_hold_sub_ = create_subscription<std_msgs::msg::Bool>(
+    "/xy_velocity_hold_active", takeover_qos,
+    std::bind(&PositionPIDController::xyVelocityHoldCallback, this, std::placeholders::_1));
+  pillar_detection_valid_sub_ = create_subscription<std_msgs::msg::Bool>(
+    "/pillar_detection_valid", takeover_qos,
+    std::bind(&PositionPIDController::pillarDetectionValidCallback, this, std::placeholders::_1));
   fine_data_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
     "/fine_data", rclcpp::QoS(10),
     std::bind(&PositionPIDController::fineDataCallback, this, std::placeholders::_1));
@@ -234,6 +243,36 @@ void PositionPIDController::visualTakeoverCallback(const std_msgs::msg::Bool::Sh
     visual_takeover_active_ ? "active" : "inactive");
 }
 
+void PositionPIDController::xyVelocityHoldCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (xy_velocity_hold_active_ == msg->data) {
+    return;
+  }
+
+  xy_velocity_hold_active_ = msg->data;
+  pid_xy_speed_.reset();
+  pid_visual_x_.reset();
+  pid_visual_y_.reset();
+
+  RCLCPP_INFO(
+    get_logger(),
+    "XY velocity hold changed: %s",
+    xy_velocity_hold_active_ ? "active" : "inactive");
+}
+
+void PositionPIDController::pillarDetectionValidCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (pillar_detection_valid_ == msg->data) {
+    return;
+  }
+
+  pillar_detection_valid_ = msg->data;
+  RCLCPP_INFO(
+    get_logger(),
+    "Pillar detection gate changed: %s",
+    pillar_detection_valid_ ? "valid, route control enabled" : "invalid, forcing zero velocity hold");
+}
+
 void PositionPIDController::fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg)
 {
   if (msg->data.size() < 2) {
@@ -252,6 +291,19 @@ bool PositionPIDController::getCurrentPose()
   try {
     geometry_msgs::msg::TransformStamped transform = tf_buffer_->lookupTransform(
       map_frame_, laser_link_frame_, tf2::TimePointZero);
+
+    const rclcpp::Time transform_time(
+      transform.header.stamp, get_clock()->get_clock_type());
+    if (transform_time.nanoseconds() > 0) {
+      const double pose_age_sec = (now() - transform_time).seconds();
+      if (pose_age_sec < 0.0 || pose_age_sec > pose_data_timeout_sec_) {
+        RCLCPP_ERROR_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Pose transform is stale (age=%.3fs, limit=%.3fs). Forcing zero velocity.",
+          pose_age_sec, pose_data_timeout_sec_);
+        return false;
+      }
+    }
 
     current_x_cm_ = meterToCm(transform.transform.translation.x);
     current_y_cm_ = meterToCm(transform.transform.translation.y);
@@ -310,7 +362,10 @@ std_msgs::msg::Float32MultiArray PositionPIDController::processPID(double dt)
   double vel_x_cm = 0.0;
   double vel_y_cm = 0.0;
 
-  if (visual_takeover_active_) {
+  if (xy_velocity_hold_active_) {
+    vel_x_cm = 0.0;
+    vel_y_cm = 0.0;
+  } else if (visual_takeover_active_) {
     const rclcpp::Time now_time = now();
     if (hasFreshVisualData(now_time)) {
       vel_x_cm = pid_visual_x_.calculate(0.0, -visual_error_x_px_, dt);
@@ -362,14 +417,30 @@ std_msgs::msg::Float32MultiArray PositionPIDController::processPID(double dt)
 
 void PositionPIDController::controlTimerCallback()
 {
+  if (!pillar_detection_valid_) {
+    std_msgs::msg::Float32MultiArray blocked_cmd;
+    blocked_cmd.data = {0.0F, 0.0F, 0.0F, 0.0F};
+    target_velocity_pub_->publish(blocked_cmd);
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "Pillar input is invalid. Sending safe hold velocity [0, 0, 0, 0].");
+    return;
+  }
+
   if (!has_target_position_) {
+    std_msgs::msg::Float32MultiArray safe_cmd;
+    safe_cmd.data = {0.0F, 0.0F, 0.0F, 0.0F};
+    target_velocity_pub_->publish(safe_cmd);
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "Waiting for /target_position. Check that route_target_publisher is running and publishing.");
+      "Waiting for /target_position. Sending safe hold velocity [0, 0, 0, 0].");
     return;
   }
 
   if (!getCurrentPose()) {
+    std_msgs::msg::Float32MultiArray safe_cmd;
+    safe_cmd.data = {0.0F, 0.0F, 0.0F, 0.0F};
+    target_velocity_pub_->publish(safe_cmd);
     return;
   }
 
@@ -399,6 +470,8 @@ void PositionPIDController::controlTimerCallback()
 void PositionPIDController::loadParameters()
 {
   control_frequency_ = declare_parameter<double>("control_frequency", 50.0);
+  pose_data_timeout_sec_ = std::max(
+    0.1, declare_parameter<double>("pose_data_timeout_sec", 0.5));
   map_frame_ = declare_parameter<std::string>("map_frame", "map");
   laser_link_frame_ = declare_parameter<std::string>("laser_link_frame", "laser_link");
 

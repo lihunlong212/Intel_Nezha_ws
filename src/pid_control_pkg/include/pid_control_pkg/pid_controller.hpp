@@ -66,6 +66,8 @@ private:
   void targetPositionCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
   void visualTakeoverCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void xyVelocityHoldCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void pillarDetectionValidCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
   void controlTimerCallback();
 
@@ -82,6 +84,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_position_sub_;
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr visual_takeover_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr xy_velocity_hold_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pillar_detection_valid_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
@@ -108,6 +112,7 @@ private:
   double current_z_cm_;
 
   double control_frequency_;
+  double pose_data_timeout_sec_;
   std::string map_frame_;
   std::string laser_link_frame_;
 
@@ -132,6 +137,8 @@ private:
   double error_z_cm_;
 
   bool visual_takeover_active_;
+  bool xy_velocity_hold_active_;
+  bool pillar_detection_valid_;
   bool has_visual_fine_data_;
   double visual_error_x_px_;
   double visual_error_y_px_;
