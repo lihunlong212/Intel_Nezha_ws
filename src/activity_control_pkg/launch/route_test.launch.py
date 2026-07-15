@@ -16,12 +16,30 @@ def generate_launch_description():
     LaunchConfiguration = getattr(launch_substitutions, "LaunchConfiguration")
     Node = getattr(launch_ros_actions, "Node")
     use_pillar_detection = LaunchConfiguration("use_pillar_detection")
+    height_source = LaunchConfiguration("height_source")
+    default_transit_y_cm = LaunchConfiguration("default_transit_y_cm")
+    pillar_detection_timeout_sec = LaunchConfiguration("pillar_detection_timeout_sec")
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "use_pillar_detection",
             default_value="true",
             description="Use two detected pillars to calculate the route transit Y coordinate.",
+        ),
+        DeclareLaunchArgument(
+            "height_source",
+            default_value="laser_array",
+            description="Height source: laser_array (/height) or uart_to_stm32 (/height_raw).",
+        ),
+        DeclareLaunchArgument(
+            "default_transit_y_cm",
+            default_value="186.0",
+            description="Fallback transit Y in cm when pillar detection times out.",
+        ),
+        DeclareLaunchArgument(
+            "pillar_detection_timeout_sec",
+            default_value="20.0",
+            description="Time to wait for pillar coordinates before using fallback transit Y.",
         ),
         Node(
             package="activity_control_pkg",
@@ -38,13 +56,18 @@ def generate_launch_description():
                     "laser_link_frame": "laser_link",
                     "output_topic": "/target_position",
                     "vision_mode_topic": "/vision_target_mode",
+                    "route_stage_command_topic": "/route_stage_command",
+                    "height_source": height_source,
+                    "laser_array_height_topic": "/height",
+                    "uart_height_topic": "/height_raw",
                     "position_tolerance_cm": 6.0,
                     "yaw_tolerance_deg": 8.0,
                     "height_tolerance_cm": 8.0,
                     "height_filter_jump_threshold_cm": 30.0,
                     "height_filter_required_frames": 5,
                     "use_pillar_detection": use_pillar_detection,
-                    "default_transit_y_cm": 125.0,
+                    "default_transit_y_cm": default_transit_y_cm,
+                    "pillar_detection_timeout_sec": pillar_detection_timeout_sec,
                     "emergency_retract_height_threshold_cm": 50.0,
                     "emergency_retract_z_velocity_threshold_cm_s": 20.0,
                     "visual_align_pixel_threshold": 35.0,

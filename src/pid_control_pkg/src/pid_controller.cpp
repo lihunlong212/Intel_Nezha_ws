@@ -417,6 +417,16 @@ std_msgs::msg::Float32MultiArray PositionPIDController::processPID(double dt)
 
 void PositionPIDController::controlTimerCallback()
 {
+  // Before route stage 1 is released there is deliberately no target position.
+  // Do not publish even a zero /target_velocity here: the flight controller treats
+  // the first target-velocity frame as the command to start the flight mission.
+  if (!has_target_position_) {
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Waiting for /target_position. /target_velocity remains silent.");
+    return;
+  }
+
   if (!pillar_detection_valid_) {
     std_msgs::msg::Float32MultiArray blocked_cmd;
     blocked_cmd.data = {0.0F, 0.0F, 0.0F, 0.0F};
@@ -424,16 +434,6 @@ void PositionPIDController::controlTimerCallback()
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 1000,
       "Pillar input is invalid. Sending safe hold velocity [0, 0, 0, 0].");
-    return;
-  }
-
-  if (!has_target_position_) {
-    std_msgs::msg::Float32MultiArray safe_cmd;
-    safe_cmd.data = {0.0F, 0.0F, 0.0F, 0.0F};
-    target_velocity_pub_->publish(safe_cmd);
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 2000,
-      "Waiting for /target_position. Sending safe hold velocity [0, 0, 0, 0].");
     return;
   }
 

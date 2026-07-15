@@ -17,7 +17,8 @@ from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.time import Time
-from std_msgs.msg import Empty, String
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Empty, String, UInt8
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
@@ -61,6 +62,14 @@ class LocalDomainListener:
         self._node.create_subscription(Empty, "/drop_done", self._on_drop, 10)
         self._node.create_subscription(Empty, "/drop_failed", self._on_drop_failed, 10)
         self._node.create_subscription(Empty, "/mission_complete", self._on_mission_complete, 10)
+        route_stage_qos = QoSProfile(depth=1)
+        route_stage_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        route_stage_qos.reliability = ReliabilityPolicy.RELIABLE
+        self._route_stage_pub = self._node.create_publisher(
+            UInt8,
+            "/route_stage_command",
+            route_stage_qos,
+        )
         self._executor = SingleThreadedExecutor(context=self._context)
         self._executor.add_node(self._node)
         self._thread = threading.Thread(target=self._spin, daemon=True)
@@ -92,6 +101,14 @@ class LocalDomainListener:
     def _on_mission_complete(self, _msg: Empty) -> None:
         self._logger.info("received /mission_complete from local domain")
         self.mission_complete.set()
+
+    def publish_route_stage(self, stage: int) -> None:
+        if stage < 0 or stage > 3:
+            raise ValueError(f"route stage must be in 0..3, got {stage}")
+        msg = UInt8()
+        msg.data = stage
+        self._route_stage_pub.publish(msg)
+        self._logger.info(f"published local /route_stage_command={stage}")
 
     def shutdown(self) -> None:
         try:

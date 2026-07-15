@@ -29,6 +29,10 @@ constexpr int kTargetTypeWaypoint = 1;
 constexpr int kTargetTypePickup = 2;
 constexpr int kTargetTypeDrop = 3;
 constexpr int kTargetTypeSearch = 4;
+constexpr uint8_t kRouteStageHold = 0;
+constexpr uint8_t kRouteStagePickup = 1;
+constexpr uint8_t kRouteStageDelivery = 2;
+constexpr uint8_t kRouteStageReturn = 3;
 constexpr double kPostPickupAltitudeCm = 120.0;
 constexpr double kLandingAltitudeCm = 15.0;
 constexpr double kPickupFailureReturnAltitudeCm = 110.0;
@@ -79,6 +83,7 @@ const char * phaseToString(TaskPhase phase)
 RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & options)
 : rclcpp::Node("route_target_publisher", options),
   current_idx_(std::numeric_limits<std::size_t>::max()),
+  allowed_route_stage_(kRouteStageHold),
   has_height_(false),
   current_height_cm_(0.0),
   latest_raw_height_cm_(0.0),
@@ -137,6 +142,25 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   laser_link_frame_ = declare_parameter("laser_link_frame", "laser_link");
   output_topic_ = declare_parameter("output_topic", "/target_position");
   vision_mode_topic_ = declare_parameter("vision_mode_topic", "/vision_target_mode");
+  route_stage_command_topic_ =
+    declare_parameter("route_stage_command_topic", "/route_stage_command");
+  // Height source interface. Both sources use std_msgs/Int16 in centimetres.
+  // Set height_source to "laser_array" (default) or "uart_to_stm32".
+  height_source_ = declare_parameter("height_source", "laser_array");
+  laser_array_height_topic_ = declare_parameter("laser_array_height_topic", "/height");
+  uart_height_topic_ = declare_parameter("uart_height_topic", "/height_raw");
+  if (height_source_ == "laser_array") {
+    height_topic_ = laser_array_height_topic_;
+  } else if (height_source_ == "uart_to_stm32") {
+    height_topic_ = uart_height_topic_;
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "Unknown height_source='%s'; falling back to laser_array.",
+      height_source_.c_str());
+    height_source_ = "laser_array";
+    height_topic_ = laser_array_height_topic_;
+  }
 
   visual_align_pixel_threshold_ = declare_parameter("visual_align_pixel_threshold", 100.0);
   visual_align_required_frames_ = declare_parameter("visual_align_required_frames", 3);
@@ -187,9 +211,17 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     create_publisher<std_msgs::msg::Empty>("/drop_failed", rclcpp::QoS(10).reliable());
 
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
-    "/height",
+    height_topic_,
     rclcpp::QoS(10),
     std::bind(&RouteTargetPublisherNode::heightCallback, this, std::placeholders::_1));
+  auto route_stage_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
+  route_stage_command_sub_ = create_subscription<std_msgs::msg::UInt8>(
+    route_stage_command_topic_,
+    route_stage_qos,
+    std::bind(
+      &RouteTargetPublisherNode::routeStageCommandCallback,
+      this,
+      std::placeholders::_1));
   target_velocity_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
     "/target_velocity",
     rclcpp::QoS(10),
@@ -219,6 +251,14 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     "RouteTargetPublisher initialized: map=%s laser_link=%s topic=%s vision_mode_topic=%s",
     map_frame_.c_str(), laser_link_frame_.c_str(), output_topic_.c_str(),
     vision_mode_topic_.c_str());
+  RCLCPP_INFO(
+    get_logger(),
+    "Height source: %s (topic=%s, unit=cm)",
+    height_source_.c_str(), height_topic_.c_str());
+  RCLCPP_INFO(
+    get_logger(),
+    "Route stage gate: topic=%s initial_stage=%u (0=hold, 1=pickup, 2=delivery, 3=return)",
+    route_stage_command_topic_.c_str(), static_cast<unsigned>(allowed_route_stage_));
   RCLCPP_INFO(
     get_logger(),
     "Tolerances: position=%.1fcm yaw=%.1fdeg height=%.1fcm",
@@ -279,9 +319,47 @@ std::size_t RouteTargetPublisherNode::size() const
 void RouteTargetPublisherNode::publishCurrent()
 {
   if (current_idx_ != std::numeric_limits<std::size_t>::max() && current_idx_ < targets_.size()) {
+    if (!isCurrentTargetStageAllowed()) {
+      publishRouteHoldState();
+      return;
+    }
     publishTarget(getPublishedTarget(targets_[current_idx_]), current_idx_ == 0);
     publishIdleVisionModeForCurrentTarget();
   }
+}
+
+void RouteTargetPublisherNode::routeStageCommandCallback(
+  const std_msgs::msg::UInt8::SharedPtr msg)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  const uint8_t requested_stage = msg->data;
+  if (requested_stage > kRouteStageReturn) {
+    RCLCPP_WARN(
+      get_logger(),
+      "Ignoring invalid route stage %u; valid range is 0..3.",
+      static_cast<unsigned>(requested_stage));
+    return;
+  }
+  if (requested_stage < allowed_route_stage_) {
+    RCLCPP_WARN(
+      get_logger(),
+      "Ignoring route stage rollback %u -> %u.",
+      static_cast<unsigned>(allowed_route_stage_),
+      static_cast<unsigned>(requested_stage));
+    return;
+  }
+  if (requested_stage == allowed_route_stage_) {
+    return;
+  }
+
+  const uint8_t previous_stage = allowed_route_stage_;
+  allowed_route_stage_ = requested_stage;
+  RCLCPP_INFO(
+    get_logger(),
+    "Route stage released: %u -> %u.",
+    static_cast<unsigned>(previous_stage),
+    static_cast<unsigned>(allowed_route_stage_));
+  publishCurrent();
 }
 
 void RouteTargetPublisherNode::publishTarget(const Target & target, bool init_flag)
@@ -596,8 +674,13 @@ void RouteTargetPublisherNode::startDropFailureReturn(
 
   targets_.resize(current_idx_ + 1);
   targets_.push_back(
-    Target{0.0, 0.0, return_altitude_cm, landing_yaw_deg, kTargetTypeWaypoint});
-  targets_.push_back(Target{0.0, 0.0, 0.0, landing_yaw_deg, kTargetTypeWaypoint});
+    Target{
+      0.0, 0.0, return_altitude_cm, landing_yaw_deg,
+      kTargetTypeWaypoint, kRouteStageReturn});
+  targets_.push_back(
+    Target{
+      0.0, 0.0, 0.0, landing_yaw_deg,
+      kTargetTypeWaypoint, kRouteStageReturn});
 
   RCLCPP_WARN(
     get_logger(),
@@ -628,8 +711,19 @@ void RouteTargetPublisherNode::startDropFailureReturn(
 void RouteTargetPublisherNode::startSearchFailureReturn(const rclcpp::Time & now_time)
 {
   targets_.resize(current_idx_ + 1);
-  targets_.push_back(Target{0.0, 0.0, kPostPickupAltitudeCm, 0.0, kTargetTypeWaypoint});
-  targets_.push_back(Target{0.0, 0.0, kLandingAltitudeCm, 0.0, kTargetTypeWaypoint});
+  targets_.push_back(
+    Target{
+      0.0, 0.0, kPostPickupAltitudeCm, 0.0,
+      kTargetTypeWaypoint, kRouteStageReturn});
+  targets_.push_back(
+    Target{
+      0.0, 0.0, kLandingAltitudeCm, 0.0,
+      kTargetTypeWaypoint, kRouteStageReturn});
+
+  if (pickup_failed_pub_) {
+    std_msgs::msg::Empty empty_msg;
+    pickup_failed_pub_->publish(empty_msg);
+  }
 
   resetFineDataState();
   publishVisionTargetMode(kVisionModeIdle);
@@ -663,9 +757,13 @@ void RouteTargetPublisherNode::startPickupFailureReturn(const rclcpp::Time & now
 
   targets_.resize(current_idx_ + 1);
   targets_.push_back(
-    Target{0.0, 0.0, kPickupFailureReturnAltitudeCm, 0.0, kTargetTypeWaypoint});
+    Target{
+      0.0, 0.0, kPickupFailureReturnAltitudeCm, 0.0,
+      kTargetTypeWaypoint, kRouteStageReturn});
   targets_.push_back(
-    Target{0.0, 0.0, kPickupFailureLandingAltitudeCm, 0.0, kTargetTypeWaypoint});
+    Target{
+      0.0, 0.0, kPickupFailureLandingAltitudeCm, 0.0,
+      kTargetTypeWaypoint, kRouteStageReturn});
 
   resetFineDataState();
   publishVisionTargetMode(kVisionModeIdle);
@@ -696,7 +794,9 @@ void RouteTargetPublisherNode::insertPostPickupClimbTarget(
   const auto insert_pos = targets_.begin() + static_cast<std::ptrdiff_t>(current_idx_ + 1);
   targets_.insert(
     insert_pos,
-    Target{x_cm, y_cm, kPostPickupAltitudeCm, yaw_deg, kTargetTypeWaypoint});
+    Target{
+      x_cm, y_cm, kPostPickupAltitudeCm, yaw_deg,
+      kTargetTypeWaypoint, kRouteStagePickup});
   RCLCPP_INFO(
     get_logger(),
     "Inserted post-pickup climb target at (%.1f, %.1f, %.1f, %.1f).",
@@ -796,6 +896,33 @@ void RouteTargetPublisherNode::publishElectromagnetControl(uint8_t state)
   std_msgs::msg::UInt8 msg;
   msg.data = state;
   electromagnet_control_pub_->publish(msg);
+}
+
+void RouteTargetPublisherNode::publishRouteHoldState()
+{
+  std_msgs::msg::UInt8 active_msg;
+  active_msg.data = 3;
+  active_controller_pub_->publish(active_msg);
+
+  if (visual_takeover_active_) {
+    visual_takeover_active_ = false;
+    publishVisualTakeoverState(false);
+  }
+  if (xy_velocity_hold_active_) {
+    xy_velocity_hold_active_ = false;
+    publishXyVelocityHoldState(false);
+  }
+  publishVisionTargetMode(kVisionModeIdle);
+}
+
+bool RouteTargetPublisherNode::isCurrentTargetStageAllowed() const
+{
+  if (current_idx_ == std::numeric_limits<std::size_t>::max() ||
+    current_idx_ >= targets_.size())
+  {
+    return false;
+  }
+  return targets_[current_idx_].route_stage <= allowed_route_stage_;
 }
 
 void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & now_time)
@@ -916,6 +1043,17 @@ void RouteTargetPublisherNode::monitorTimerCallback()
   }
 
   if (current_idx_ == std::numeric_limits<std::size_t>::max()) {
+    return;
+  }
+
+  if (!isCurrentTargetStageAllowed()) {
+    publishRouteHoldState();
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Route held before target %zu: target_stage=%u allowed_stage=%u.",
+      current_idx_,
+      static_cast<unsigned>(targets_[current_idx_].route_stage),
+      static_cast<unsigned>(allowed_route_stage_));
     return;
   }
 
@@ -1073,8 +1211,8 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         publishElectromagnetControl(0x00);
         publishServoControl(0x00);
         has_aligned_position_ = false;  // 超时跳过，清掉锁�?
-        setPhase(TaskPhase::Idle, now_time);
-        advanceToNextTarget();
+        pickup_attempts_ = std::max(pickup_attempts_ + 1, pickup_max_attempts_);
+        startPickupFailureReturn(now_time);
         return;
       }
 
@@ -1354,7 +1492,10 @@ RouteTestNode::RouteTestNode(
 {
   std::setlocale(LC_ALL, "");
   use_pillar_detection_ = declare_parameter<bool>("use_pillar_detection", true);
-  default_transit_y_cm_ = declare_parameter<double>("default_transit_y_cm", 125.0);
+  default_transit_y_cm_ = declare_parameter<double>("default_transit_y_cm", 186.0);
+  pillar_detection_timeout_sec_ = std::max(
+    0.1,
+    declare_parameter<double>("pillar_detection_timeout_sec", 20.0));
 
   auto pillar_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
   pillar_detection_valid_pub_ = create_publisher<std_msgs::msg::Bool>(
@@ -1366,9 +1507,13 @@ RouteTestNode::RouteTestNode(
       "/detected_pillars",
       pillar_qos,
       std::bind(&RouteTestNode::detectedPillarsCallback, this, std::placeholders::_1));
+    pillar_detection_timeout_timer_ = create_wall_timer(
+      std::chrono::duration<double>(pillar_detection_timeout_sec_),
+      std::bind(&RouteTestNode::pillarDetectionTimeoutCallback, this));
     RCLCPP_INFO(
       get_logger(),
-      "Pillar detection enabled. Waiting for two pillars on /detected_pillars before loading the route.");
+      "Pillar detection enabled. Waiting %.1fs for /detected_pillars; fallback transit_y=%.1fcm.",
+      pillar_detection_timeout_sec_, default_transit_y_cm_);
     return;
   }
 
@@ -1386,6 +1531,28 @@ void RouteTestNode::publishPillarDetectionValid(bool valid)
   std_msgs::msg::Bool msg;
   msg.data = valid;
   pillar_detection_valid_pub_->publish(msg);
+}
+
+void RouteTestNode::pillarDetectionTimeoutCallback()
+{
+  std::lock_guard<std::mutex> lock(route_load_mutex_);
+  if (route_loaded_) {
+    if (pillar_detection_timeout_timer_) {
+      pillar_detection_timeout_timer_->cancel();
+    }
+    return;
+  }
+
+  route_loaded_ = true;
+  loadRoute(buildRoute(default_transit_y_cm_));
+  publishPillarDetectionValid(true);
+  if (pillar_detection_timeout_timer_) {
+    pillar_detection_timeout_timer_->cancel();
+  }
+  RCLCPP_WARN(
+    get_logger(),
+    "Pillar detection timed out. Using fallback transit_y=%.1fcm.",
+    default_transit_y_cm_);
 }
 
 void RouteTestNode::detectedPillarsCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
@@ -1421,6 +1588,9 @@ void RouteTestNode::detectedPillarsCallback(const std_msgs::msg::Float32MultiArr
   }
 
   route_loaded_ = true;
+  if (pillar_detection_timeout_timer_) {
+    pillar_detection_timeout_timer_->cancel();
+  }
   RCLCPP_INFO(
     get_logger(),
     "Two pillar Y coordinates received: y1=%.3fm y2=%.3fm; using transit_y=%.1fcm for four waypoints.",
@@ -1432,24 +1602,24 @@ void RouteTestNode::detectedPillarsCallback(const std_msgs::msg::Float32MultiArr
 std::vector<Target> RouteTestNode::buildRoute(double transit_y_cm) const
 {
   return std::vector<Target>{
-    Target{0.0, 0.0, 80.0, 0.0, kTargetTypeWaypoint},
-    Target{-32.0, 65.0, 80.0, 0.0, kTargetTypeSearch},
-    Target{-32.0, 182.0, 80.0, 0.0, kTargetTypeSearch},
-    Target{0.0, 182.0, 80.0, 0.0, kTargetTypeSearch},
-    Target{0.0, 65.0, 80.0, 0.0, kTargetTypeSearch},
-    Target{35.0, 65.0, 80.0, 0.0, kTargetTypeSearch},
-    Target{35.0, 182.0, 80.0, 0.0, kTargetTypeSearch},
+    Target{0.0, 0.0, 80.0, 0.0, kTargetTypeWaypoint, kRouteStagePickup},
+    Target{0.0, 300.0, 80.0, 0.0, kTargetTypeSearch, kRouteStagePickup},
+    Target{0.0, transit_y_cm, 120.0, 0.0, kTargetTypeWaypoint, kRouteStagePickup},
 
 
-    Target{20.0, transit_y_cm, 120.0, 0.0, kTargetTypeWaypoint},
-    Target{130.0, transit_y_cm, 120.0, 0.0, kTargetTypeWaypoint},
+    Target{
+      100.0, transit_y_cm, 120.0, 0.0,
+      kTargetTypeWaypoint, kRouteStageDelivery},
+    Target{
+      130.0, transit_y_cm, 120.0, 0.0,
+      kTargetTypeWaypoint, kRouteStageDelivery},
 
-    Target{193.0, 56.0, 120.0, 0.0, kTargetTypeDrop},
+    Target{164.0, 56.0, 120.0, 0.0, kTargetTypeDrop, kRouteStageDelivery},
     
-    Target{130.0, transit_y_cm, 120.0, 0.0, kTargetTypeWaypoint},
-    Target{0.0, transit_y_cm, 120.0, 0.0, kTargetTypeWaypoint},
-    Target{0.0, 0.0, 120.0, 0.0, kTargetTypeWaypoint},
-    Target{0.0, 0.0, kLandingAltitudeCm, 0.0, kTargetTypeWaypoint},
+    Target{0.0, 0.0, 120.0, 0.0, kTargetTypeWaypoint, kRouteStageReturn},
+    Target{
+      0.0, 0.0, kLandingAltitudeCm, 0.0,
+      kTargetTypeWaypoint, kRouteStageReturn},
   };
 }
 

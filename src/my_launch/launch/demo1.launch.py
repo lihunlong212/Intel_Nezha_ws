@@ -16,6 +16,8 @@ def _package_launch(package_name: str, filename: str) -> str:
 def generate_launch_description() -> LaunchDescription:
     target_square_color = LaunchConfiguration("target_square_color")
     use_pillar_detection = LaunchConfiguration("use_pillar_detection")
+    default_transit_y_cm = LaunchConfiguration("default_transit_y_cm")
+    pillar_detection_timeout_sec = LaunchConfiguration("pillar_detection_timeout_sec")
 
     fly_carto_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(_package_launch("my_carto_pkg", "fly_carto.launch.py"))
@@ -41,7 +43,11 @@ def generate_launch_description() -> LaunchDescription:
     )
     route_test_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(_package_launch("activity_control_pkg", "route_test.launch.py")),
-        launch_arguments={"use_pillar_detection": use_pillar_detection}.items(),
+        launch_arguments={
+            "use_pillar_detection": use_pillar_detection,
+            "default_transit_y_cm": default_transit_y_cm,
+            "pillar_detection_timeout_sec": pillar_detection_timeout_sec,
+        }.items(),
     )
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -61,6 +67,16 @@ def generate_launch_description() -> LaunchDescription:
                 "use_pillar_detection",
                 default_value="true",
                 description="Enable pillar-based transit Y calculation before takeoff.",
+            ),
+            DeclareLaunchArgument(
+                "default_transit_y_cm",
+                default_value="186.0",
+                description="Fallback transit Y in cm if pillar detection has no result.",
+            ),
+            DeclareLaunchArgument(
+                "pillar_detection_timeout_sec",
+                default_value="20.0",
+                description="Pillar detection timeout before using fallback transit Y.",
             ),
             fly_carto_launch,
             TimerAction(period=2.0, actions=[uart_to_stm32_launch]),

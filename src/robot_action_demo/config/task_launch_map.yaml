@@ -1,4 +1,5 @@
-target_domain_id: "0"
+device_id: "drone1"
+coordination_discovery_sec: 20.0
 tasks:
   huawei:
     package: "my_launch"

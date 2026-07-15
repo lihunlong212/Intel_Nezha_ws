@@ -29,6 +29,7 @@ struct Target
   double z_cm;
   double yaw_deg;
   int type = 1;
+  uint8_t route_stage = 1;
 };
 
 // 任务子状态机
@@ -67,6 +68,7 @@ private:
   bool hasFreshFineData(const rclcpp::Time & now_time) const;
 
   void monitorTimerCallback();
+  void routeStageCommandCallback(const std_msgs::msg::UInt8::SharedPtr msg);
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
   void targetVelocityCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
@@ -84,6 +86,8 @@ private:
   void publishVisionTargetMode(uint8_t mode);
   void publishServoControl(uint8_t state);
   void publishElectromagnetControl(uint8_t state);
+  void publishRouteHoldState();
+  bool isCurrentTargetStageAllowed() const;
   void setPhase(TaskPhase phase, const rclcpp::Time & now_time);
 
   static double meterToCm(double value_m);
@@ -103,6 +107,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr drop_done_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr drop_failed_pub_;
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr route_stage_command_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_sub_;
   rclcpp::TimerBase::SharedPtr monitor_timer_;
@@ -113,6 +118,7 @@ private:
   mutable std::mutex mutex_;
   std::vector<Target> targets_;
   std::size_t current_idx_;
+  uint8_t allowed_route_stage_;
 
   bool has_height_;
   double current_height_cm_;
@@ -134,6 +140,11 @@ private:
   std::string laser_link_frame_;
   std::string output_topic_;
   std::string vision_mode_topic_;
+  std::string route_stage_command_topic_;
+  std::string height_source_;
+  std::string height_topic_;
+  std::string laser_array_height_topic_;
+  std::string uart_height_topic_;
 
   // 视觉对准参数
   double visual_align_pixel_threshold_;
@@ -197,6 +208,7 @@ public:
 
 private:
   void detectedPillarsCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
+  void pillarDetectionTimeoutCallback();
   void publishPillarDetectionValid(bool valid);
   std::vector<Target> buildRoute(double transit_y_cm) const;
   void loadRoute(const std::vector<Target> & route);
@@ -204,9 +216,11 @@ private:
   std::shared_ptr<RouteTargetPublisherNode> route_node_;
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr detected_pillars_sub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pillar_detection_valid_pub_;
+  rclcpp::TimerBase::SharedPtr pillar_detection_timeout_timer_;
   std::mutex route_load_mutex_;
   bool use_pillar_detection_ = true;
-  double default_transit_y_cm_ = 125.0;
+  double default_transit_y_cm_ = 186.0;
+  double pillar_detection_timeout_sec_ = 20.0;
   bool route_loaded_ = false;
 };
 

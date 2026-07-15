@@ -82,6 +82,19 @@ starts the mapped local mission, and publishes only `/fleet/device_status` and
 It does **not** provide the `/aiagent/dispatch_order` Action Server; that server belongs
 on the remote dispatch side.
 
+Each aircraft runs one `dispatch_server` in fleet domain 10. Set `device_id` in
+`robot_action_demo/config/task_launch_map.yaml` to `drone1`, `drone2`, or `drone3`.
+The local flight mission is automatically isolated in ROS domain 1, 2, or 3 to
+match the device number. A server process accepts only one mission; restart it
+before the next competition run.
+If pillar detection has no valid result before its timeout, drone1/drone3 use
+`transit_y_cm=186` and drone2 uses `transit_y_cm=-186`.
+
+Fleet states are `IDLE -> ORDER_ACCEPTED -> PICKING_UP -> DELIVERING -> DELIVERED -> LANDED`.
+The route is released in pickup, delivery, and return stages through the local
+`/route_stage_command` topic. Until pickup is released the PID deliberately does
+not publish `/target_velocity`, so accepting an order alone cannot start flight.
+
 ### `my_launch`
 
 Launches the complete demo flow.
