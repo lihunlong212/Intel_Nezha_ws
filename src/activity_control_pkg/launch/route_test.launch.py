@@ -23,7 +23,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "use_pillar_detection",
-            default_value="true",
+            default_value="false",
             description="Use two detected pillars to calculate the route transit Y coordinate.",
         ),
         DeclareLaunchArgument(
@@ -36,7 +36,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "default_transit_y_cm",
-            default_value="186.0",
+            default_value="168.0",
             description="Fallback transit Y in cm when pillar detection times out.",
         ),
         DeclareLaunchArgument(
@@ -63,7 +63,7 @@ def generate_launch_description():
                     "height_source": height_source,
                     "laser_array_height_topic": "/height",
                     "uart_height_topic": "/height_raw",
-                    "position_tolerance_cm": 6.0,
+                    "position_tolerance_cm": 8.0,
                     "yaw_tolerance_deg": 8.0,
                     "height_tolerance_cm": 8.0,
                     "height_filter_jump_threshold_cm": 30.0,
@@ -78,8 +78,8 @@ def generate_launch_description():
                     "visual_takeover_timeout_sec": 15.0,
                     "fine_data_stale_timeout_sec": 0.13,
                     # 抓取航点（type=2）参数
-                    "pickup_align_altitude_cm": 27.0,
-                    "pickup_grab_altitude_cm": 14.0,
+                    "pickup_align_altitude_cm": 33.0,
+                    "pickup_grab_altitude_cm": 18.0,
                     "pickup_hold_at_grab_sec": 1.0,
                     "pickup_check_altitude_cm": 60.0,
                     "pickup_check_observe_sec": 2.0,
