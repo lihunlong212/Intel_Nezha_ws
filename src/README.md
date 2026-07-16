@@ -82,18 +82,16 @@ starts the mapped local mission, and publishes only `/fleet/device_status` and
 It does **not** provide the `/aiagent/dispatch_order` Action Server; that server belongs
 on the remote dispatch side.
 
-Each aircraft runs one `dispatch_server` in fleet domain 10. Set `device_id` in
-`robot_action_demo/config/task_launch_map.yaml` to `drone1`, `drone2`, or `drone3`.
+Each aircraft runs one `dispatch_server` in fleet domain 10. All editable mission
+settings now live in the single file `my_launch/config/drone_config.yaml`. Set
+`drone.device_id` there to `drone1`, `drone2`, or `drone3`.
 The local flight mission is automatically isolated in ROS domain 1, 2, or 3 to
 match the device number. A server process accepts only one mission; restart it
 before the next competition run.
 If pillar detection has no valid result before its timeout, drone1/drone3 use
 `transit_y_cm=186` and drone2 uses `transit_y_cm=-186`.
-Set `height_source` in the same YAML independently on each aircraft:
-
-- `laser_array`: use `/height` and start `laser_array_ground_node`.
-- `uart_to_stm32`: use UART `/height_raw` and do not start the laser-array node.
-- `uart_to_32` is accepted as a compatibility alias for `uart_to_stm32`.
+Height is provided only by `uart_to_stm32`, which publishes centimetres directly
+on `/height`. The route and PID nodes both consume that topic directly.
 
 Fleet states are `IDLE -> ORDER_ACCEPTED -> PICKING_UP -> DELIVERING -> DELIVERED -> LANDED`.
 The route is released in pickup, delivery, and return stages through the local
@@ -107,6 +105,12 @@ Launches the complete demo flow.
 Key file:
 
 - `my_launch/launch/demo1.launch.py`
+- `my_launch/config/drone_config.yaml` (the only normal tuning entry point)
+
+The same YAML controls pillar detection, fallback transit Y,
+height filtering, route/pickup/drop tuning, PID tuning, and order color mapping.
+The launch files and C++ defaults are implementation fallbacks and should not be
+edited for per-aircraft tuning.
 
 ### `pid_control_pkg`
 
@@ -157,6 +161,13 @@ Current serial frame usage:
 ros2 launch pid_control_pkg position_pid_controller.launch.py
 ros2 launch uart_to_stm32 uart_to_stm32.launch.py
 ros2 launch my_launch demo1.launch.py
-ros2 launch my_launch demo1.launch.py height_source:=uart_to_32
 ros2 run robot_action_demo dispatch_receiver
+```
+
+To use a non-default configuration file:
+
+```bash
+ros2 launch my_launch demo1.launch.py config_file:=/absolute/path/drone_config.yaml
+DRONE_CONFIG_FILE=/absolute/path/drone_config.yaml ROS_DOMAIN_ID=10 \
+  ros2 run robot_action_demo dispatch_server
 ```

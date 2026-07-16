@@ -1,11 +1,24 @@
 import os
+from typing import Any
 
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
-from launch.conditions import IfCondition
+from launch import LaunchContext, LaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    TimerAction,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
+
+from my_launch.config_loader import (
+    VALID_TARGET_COLORS,
+    DroneConfigError,
+    load_drone_config,
+    resolve_config_path,
+    target_color_for_item,
+)
 
 
 def _package_launch(package_name: str, filename: str) -> str:
@@ -13,94 +26,94 @@ def _package_launch(package_name: str, filename: str) -> str:
     return os.path.join(package_share, "launch", filename)
 
 
-def generate_launch_description() -> LaunchDescription:
-    target_square_color = LaunchConfiguration("target_square_color")
-    use_pillar_detection = LaunchConfiguration("use_pillar_detection")
-    default_transit_y_cm = LaunchConfiguration("default_transit_y_cm")
-    pillar_detection_timeout_sec = LaunchConfiguration("pillar_detection_timeout_sec")
-    height_source = LaunchConfiguration("height_source")
+def _include(package_name: str, filename: str, launch_arguments=None):
+    return IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(_package_launch(package_name, filename)),
+        launch_arguments=(launch_arguments or {}).items(),
+    )
 
-    fly_carto_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(_package_launch("my_carto_pkg", "fly_carto.launch.py"))
-    )
-    uart_to_stm32_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(_package_launch("uart_to_stm32", "uart_to_stm32.launch.py"))
-    )
-    laser_array_ground_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            _package_launch("laser_array_pkg", "laser_array_ground.launch.py")
-        ),
-        condition=IfCondition(
-            PythonExpression(
-                [
-                    "'",
-                    height_source,
-                    "' not in ['uart_to_stm32', 'uart_to_32', 'uart']",
-                ]
+
+def _launch_demo(context: LaunchContext) -> list[Any]:
+    requested_config = LaunchConfiguration("config_file").perform(context)
+    config_path, config = load_drone_config(requested_config)
+    hardware = config["hardware"]
+
+    color_override = LaunchConfiguration("target_square_color").perform(context).strip().lower()
+    if color_override:
+        if color_override not in VALID_TARGET_COLORS:
+            raise DroneConfigError(
+                f"target_square_color must be one of {VALID_TARGET_COLORS}, "
+                f"got {color_override!r}"
             )
-        ),
-    )
-    pillar_detector_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            _package_launch("pillar_detector_pkg", "pillar_detector.launch.py")
-        ),
-        condition=IfCondition(use_pillar_detection),
-    )
-    position_pid_controller_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            _package_launch("pid_control_pkg", "position_pid_controller.launch.py")
-        ),
-        launch_arguments={"height_source": height_source}.items(),
-    )
-    route_test_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(_package_launch("activity_control_pkg", "route_test.launch.py")),
-        launch_arguments={
-            "use_pillar_detection": use_pillar_detection,
-            "default_transit_y_cm": default_transit_y_cm,
-            "pillar_detection_timeout_sec": pillar_detection_timeout_sec,
-            "height_source": height_source,
-        }.items(),
-    )
-    camera_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            _package_launch("drone_camera_pkg", "black_circle_camera.launch.py")
-        ),
-        launch_arguments={"target_square_color": target_square_color}.items(),
-    )
+        target_color = color_override
+    else:
+        target_color = target_color_for_item(config, "*")
 
+    config_arg = {"config_file": str(config_path)}
+    actions: list[Any] = [
+        _include("my_carto_pkg", "fly_carto.launch.py"),
+        TimerAction(
+            period=2.0,
+            actions=[_include("uart_to_stm32", "uart_to_stm32.launch.py")],
+        ),
+    ]
+    if hardware["use_pillar_detection"]:
+        actions.append(
+            TimerAction(
+                period=2.0,
+                actions=[_include("pillar_detector_pkg", "pillar_detector.launch.py")],
+            )
+        )
+    actions.extend(
+        [
+            TimerAction(
+                period=4.0,
+                actions=[
+                    _include(
+                        "drone_camera_pkg",
+                        "black_circle_camera.launch.py",
+                        {"target_square_color": target_color},
+                    )
+                ],
+            ),
+            TimerAction(
+                period=6.0,
+                actions=[
+                    _include(
+                        "pid_control_pkg",
+                        "position_pid_controller.launch.py",
+                        config_arg,
+                    )
+                ],
+            ),
+            TimerAction(
+                period=8.0,
+                actions=[
+                    _include(
+                        "activity_control_pkg",
+                        "route_test.launch.py",
+                        config_arg,
+                    )
+                ],
+            ),
+        ]
+    )
+    return actions
+
+
+def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument(
+                "config_file",
+                default_value=str(resolve_config_path()),
+                description="Single drone configuration YAML.",
+            ),
+            DeclareLaunchArgument(
                 "target_square_color",
-                default_value="red",
-                description="Initial color square target: red, black, or blue.",
+                default_value="",
+                description="Optional per-order color override: red, black, or blue.",
             ),
-            DeclareLaunchArgument(
-                "use_pillar_detection",
-                default_value="true",
-                description="Enable pillar-based transit Y calculation before takeoff.",
-            ),
-            DeclareLaunchArgument(
-                "default_transit_y_cm",
-                default_value="186.0",
-                description="Fallback transit Y in cm if pillar detection has no result.",
-            ),
-            DeclareLaunchArgument(
-                "pillar_detection_timeout_sec",
-                default_value="20.0",
-                description="Pillar detection timeout before using fallback transit Y.",
-            ),
-            DeclareLaunchArgument(
-                "height_source",
-                default_value="laser_array",
-                description="Height source: laser_array or uart_to_stm32 (uart_to_32 alias supported).",
-            ),
-            fly_carto_launch,
-            TimerAction(period=2.0, actions=[uart_to_stm32_launch]),
-            TimerAction(period=2.0, actions=[pillar_detector_launch]),
-            TimerAction(period=3.0, actions=[laser_array_ground_launch]),
-            TimerAction(period=4.0, actions=[camera_launch]),
-            TimerAction(period=6.0, actions=[position_pid_controller_launch]),
-            TimerAction(period=8.0, actions=[route_test_launch]),
+            OpaqueFunction(function=_launch_demo),
         ]
     )

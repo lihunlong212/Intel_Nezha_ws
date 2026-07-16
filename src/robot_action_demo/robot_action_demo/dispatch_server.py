@@ -10,20 +10,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import rclpy
-import yaml
-from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from my_launch.config_loader import load_drone_config, resolve_config_path
 from robot_action_demo.coordination import (
     DELIVERY_RELEASE_STATES,
     PICKUP_RELEASE_STATES,
     VALID_DEVICE_IDS,
-    default_transit_y_cm,
     device_priority,
-    normalize_height_source,
     predecessor_reached,
     select_predecessor,
 )
@@ -34,8 +31,6 @@ from robot_action_demo.dispatch_worker import (
 )
 
 
-PACKAGE_NAME = "robot_action_demo"
-DEFAULT_CONFIG_NAME = "task_launch_map.yaml"
 FLEET_DEVICE_STATUS_TOPIC = "/fleet/device_status"
 FLEET_ORDERS_TOPIC = "/fleet/orders"
 FLEET_ORDER_EVENTS_TOPIC = "/fleet/order_events"
@@ -74,17 +69,12 @@ class DispatchReceiver(Node):
     def __init__(self) -> None:
         super().__init__("dispatch_receiver")
         (
+            self._config_path,
             configured_device_id,
             configured_discovery_sec,
-            configured_height_source,
             self._tasks,
         ) = self._load_config()
-        parameter_device_id = str(
-            self.declare_parameter("device_id", configured_device_id).value
-        )
-        self._device_id = self._normalize_device_id(
-            os.environ.get("DISPATCH_DEVICE_ID", parameter_device_id)
-        )
+        self._device_id = self._normalize_device_id(configured_device_id)
         if self._device_id not in VALID_DEVICE_IDS:
             raise RuntimeError(
                 f"device_id must be one of {VALID_DEVICE_IDS}, got {self._device_id!r}"
@@ -92,18 +82,7 @@ class DispatchReceiver(Node):
 
         self._priority = device_priority(self._device_id)
         self._target_domain_id = str(self._priority)
-        self._height_source = normalize_height_source(
-            os.environ.get("DISPATCH_HEIGHT_SOURCE", configured_height_source)
-        )
-        self._coordination_discovery_sec = max(
-            0.0,
-            float(
-                self.declare_parameter(
-                    "coordination_discovery_sec",
-                    configured_discovery_sec,
-                ).value
-            ),
-        )
+        self._coordination_discovery_sec = configured_discovery_sec
 
         self._callback_group = ReentrantCallbackGroup()
         self._state_lock = threading.RLock()
@@ -154,7 +133,7 @@ class DispatchReceiver(Node):
         self.get_logger().info(
             f"dispatch receiver ready for {self._device_id}; fleet_domain={fleet_domain}, "
             f"local_domain={self._target_domain_id}, "
-            f"height_source={self._height_source}, "
+            f"config={self._config_path}, "
             f"discovery={self._coordination_discovery_sec:.1f}s"
         )
 
@@ -565,37 +544,31 @@ class DispatchReceiver(Node):
         with self._peer_condition:
             self._peer_condition.notify_all()
 
-    def _load_config(self) -> tuple[str, float, str, dict[str, LaunchTask]]:
+    def _load_config(self) -> tuple[Path, str, float, dict[str, LaunchTask]]:
         config_path = self._get_config_path()
-        with config_path.open("r", encoding="utf-8") as stream:
-            config = yaml.safe_load(stream) or {}
-
-        device_id = str(config.get("device_id", "drone1"))
-        discovery_sec = float(config.get("coordination_discovery_sec", 20.0))
-        height_source = str(config.get("height_source", "laser_array"))
+        config_path, config = load_drone_config(config_path)
+        device_id = str(config["drone"]["device_id"])
+        discovery_sec = float(config["drone"]["coordination_discovery_sec"])
         tasks: dict[str, LaunchTask] = {}
-        for item, task_config in (config.get("tasks") or {}).items():
+        for item, task_config in config["tasks"].items():
             tasks[str(item)] = LaunchTask(
-                package=str(task_config["package"]),
-                launch_file=str(task_config["launch_file"]),
-                args=[str(arg) for arg in task_config.get("args", [])],
+                package="my_launch",
+                launch_file="demo1.launch.py",
+                args=[f"target_square_color:={task_config['target_square_color']}"],
             )
-        if not tasks:
-            raise RuntimeError(f"no launch tasks configured in {config_path}")
-        return device_id, discovery_sec, height_source, tasks
+        return config_path, device_id, discovery_sec, tasks
 
     def _get_config_path(self) -> Path:
-        override_path = os.environ.get("DISPATCH_TASK_CONFIG")
+        override_path = os.environ.get("DRONE_CONFIG_FILE")
         if override_path:
             return Path(override_path)
-        try:
-            share_dir = Path(get_package_share_directory(PACKAGE_NAME))
-            installed_config = share_dir / "config" / DEFAULT_CONFIG_NAME
-            if installed_config.exists():
-                return installed_config
-        except PackageNotFoundError:
-            pass
-        return Path(__file__).resolve().parents[1] / "config" / DEFAULT_CONFIG_NAME
+        legacy_path = os.environ.get("DISPATCH_TASK_CONFIG")
+        if legacy_path:
+            self.get_logger().warning(
+                "DISPATCH_TASK_CONFIG is deprecated; use DRONE_CONFIG_FILE instead."
+            )
+            return Path(legacy_path)
+        return resolve_config_path()
 
     def _select_task(self, item: str) -> LaunchTask | None:
         normalized_item = self._normalize_item(item)
@@ -624,16 +597,13 @@ class DispatchReceiver(Node):
     def _start_launch_subprocess(self, task: LaunchTask) -> subprocess.Popen:
         env = os.environ.copy()
         env["ROS_DOMAIN_ID"] = self._target_domain_id
-        transit_y_cm = default_transit_y_cm(self._device_id)
         command = [
             *task.command,
-            f"default_transit_y_cm:={transit_y_cm:.1f}",
-            f"height_source:={self._height_source}",
+            f"config_file:={self._config_path}",
         ]
         self.get_logger().info(
             f"starting local mission in domain {self._target_domain_id}, "
-            f"fallback transit_y={transit_y_cm:.1f}cm, "
-            f"height_source={self._height_source}: {' '.join(command)}"
+            f"config={self._config_path}: {' '.join(command)}"
         )
         kwargs: dict[str, object] = {"env": env}
         if os.name != "nt":

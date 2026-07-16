@@ -87,6 +87,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   has_height_(false),
   current_height_cm_(0.0),
   latest_raw_height_cm_(0.0),
+  height_min_cm_(0.0),
+  height_max_cm_(200.0),
   height_filter_jump_threshold_cm_(0.0),
   height_filter_required_frames_(0),
   has_height_filter_candidate_(false),
@@ -132,7 +134,12 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pos_tol_cm_ = declare_parameter("position_tolerance_cm", 9.0);
   yaw_tol_deg_ = declare_parameter("yaw_tolerance_deg", 5.0);
   height_tol_cm_ = declare_parameter("height_tolerance_cm", 12.0);
-  height_filter_jump_threshold_cm_ = declare_parameter("height_filter_jump_threshold_cm", 30.0);
+  height_min_cm_ = declare_parameter("height_min_cm", 0.0);
+  height_max_cm_ = declare_parameter("height_max_cm", 200.0);
+  if (height_min_cm_ > height_max_cm_) {
+    std::swap(height_min_cm_, height_max_cm_);
+  }
+  height_filter_jump_threshold_cm_ = declare_parameter("height_filter_jump_threshold_cm", 35.0);
   height_filter_required_frames_ = declare_parameter("height_filter_required_frames", 5);
   emergency_retract_height_threshold_cm_ =
     declare_parameter("emergency_retract_height_threshold_cm", 50.0);
@@ -144,30 +151,6 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   vision_mode_topic_ = declare_parameter("vision_mode_topic", "/vision_target_mode");
   route_stage_command_topic_ =
     declare_parameter("route_stage_command_topic", "/route_stage_command");
-  // Height source interface. Both sources use std_msgs/Int16 in centimetres.
-  // Set height_source to "laser_array" (default) or "uart_to_stm32".
-  // "uart_to_32" and "uart" are accepted as aliases for compatibility.
-  // "uart_to_32" is accepted as a compatibility alias.
-  height_source_ = declare_parameter("height_source", "laser_array");
-  laser_array_height_topic_ = declare_parameter("laser_array_height_topic", "/height");
-  uart_height_topic_ = declare_parameter("uart_height_topic", "/height_raw");
-  if (height_source_ == "laser_array") {
-    height_topic_ = laser_array_height_topic_;
-  } else if (
-    height_source_ == "uart_to_stm32" ||
-    height_source_ == "uart_to_32" ||
-    height_source_ == "uart")
-  {
-    height_source_ = "uart_to_stm32";
-    height_topic_ = uart_height_topic_;
-  } else {
-    RCLCPP_WARN(
-      get_logger(),
-      "Unknown height_source='%s'; falling back to laser_array.",
-      height_source_.c_str());
-    height_source_ = "laser_array";
-    height_topic_ = laser_array_height_topic_;
-  }
 
   visual_align_pixel_threshold_ = declare_parameter("visual_align_pixel_threshold", 100.0);
   visual_align_required_frames_ = declare_parameter("visual_align_required_frames", 3);
@@ -218,7 +201,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     create_publisher<std_msgs::msg::Empty>("/drop_failed", rclcpp::QoS(10).reliable());
 
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
-    height_topic_,
+    "/height",
     rclcpp::QoS(10),
     std::bind(&RouteTargetPublisherNode::heightCallback, this, std::placeholders::_1));
   auto route_stage_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
@@ -258,10 +241,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     "RouteTargetPublisher initialized: map=%s laser_link=%s topic=%s vision_mode_topic=%s",
     map_frame_.c_str(), laser_link_frame_.c_str(), output_topic_.c_str(),
     vision_mode_topic_.c_str());
-  RCLCPP_INFO(
-    get_logger(),
-    "Height source: %s (topic=%s, unit=cm)",
-    height_source_.c_str(), height_topic_.c_str());
+  RCLCPP_INFO(get_logger(), "Height input: UART /height (unit=cm)");
   RCLCPP_INFO(
     get_logger(),
     "Route stage gate: topic=%s initial_stage=%u (0=hold, 1=pickup, 2=delivery, 3=return)",
@@ -272,7 +252,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     pos_tol_cm_, yaw_tol_deg_, height_tol_cm_);
   RCLCPP_INFO(
     get_logger(),
-    "Height filter: jump_threshold=%.1fcm required_frames=%d",
+    "Height filter: valid_range=[%.1f, %.1f]cm jump_threshold=%.1fcm required_frames=%d",
+    height_min_cm_, height_max_cm_,
     height_filter_jump_threshold_cm_, height_filter_required_frames_);
   RCLCPP_INFO(
     get_logger(),
@@ -458,9 +439,20 @@ void RouteTargetPublisherNode::heightCallback(const std_msgs::msg::Int16::Shared
 {
   std::lock_guard<std::mutex> lock(mutex_);
   const double raw_height_cm = static_cast<double>(msg->data);
-  latest_raw_height_cm_ = raw_height_cm;
   const double jump_threshold_cm = std::max(0.0, height_filter_jump_threshold_cm_);
   const int required_frames = std::max(1, height_filter_required_frames_);
+
+  if (raw_height_cm < height_min_cm_ || raw_height_cm > height_max_cm_) {
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "Rejected out-of-range /height: raw=%.1fcm valid_range=[%.1f, %.1f]cm",
+      raw_height_cm, height_min_cm_, height_max_cm_);
+    return;
+  }
+
+  latest_raw_height_cm_ = raw_height_cm;
 
   if (!has_height_) {
     current_height_cm_ = raw_height_cm;

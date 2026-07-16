@@ -1,97 +1,40 @@
-from importlib import import_module
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:  # pragma: no cover
-    LaunchDescription = Any
-    Node = Any
+from launch import LaunchContext, LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+from my_launch.config_loader import (
+    load_drone_config,
+    resolve_config_path,
+    route_parameters,
+)
 
 
-def generate_launch_description():
-    launch_module = import_module("launch")
-    launch_actions = import_module("launch.actions")
-    launch_substitutions = import_module("launch.substitutions")
-    launch_ros_actions = import_module("launch_ros.actions")
-    LaunchDescription = getattr(launch_module, "LaunchDescription")
-    DeclareLaunchArgument = getattr(launch_actions, "DeclareLaunchArgument")
-    LaunchConfiguration = getattr(launch_substitutions, "LaunchConfiguration")
-    Node = getattr(launch_ros_actions, "Node")
-    use_pillar_detection = LaunchConfiguration("use_pillar_detection")
-    height_source = LaunchConfiguration("height_source")
-    default_transit_y_cm = LaunchConfiguration("default_transit_y_cm")
-    pillar_detection_timeout_sec = LaunchConfiguration("pillar_detection_timeout_sec")
-
-    return LaunchDescription([
-        DeclareLaunchArgument(
-            "use_pillar_detection",
-            default_value="false",
-            description="Use two detected pillars to calculate the route transit Y coordinate.",
-        ),
-        DeclareLaunchArgument(
-            "height_source",
-            default_value="laser_array",
-            description=(
-                "Height source: laser_array (/height) or uart_to_stm32/uart_to_32 "
-                "(/height_raw)."
-            ),
-        ),
-        DeclareLaunchArgument(
-            "default_transit_y_cm",
-            default_value="168.0",
-            description="Fallback transit Y in cm when pillar detection times out.",
-        ),
-        DeclareLaunchArgument(
-            "pillar_detection_timeout_sec",
-            default_value="20.0",
-            description="Time to wait for pillar coordinates before using fallback transit Y.",
-        ),
+def _launch_route(context: LaunchContext) -> list[Any]:
+    config_file = LaunchConfiguration("config_file").perform(context)
+    config_path, config = load_drone_config(config_file)
+    params = route_parameters(config)
+    return [
         Node(
             package="activity_control_pkg",
             executable="route_test_node",
-            # 不设置 name=...：本可执行文件内部有 2 个节点
-            #   - RouteTargetPublisherNode 名为 "route_target_publisher"
-            #   - RouteTestNode 名为 "route_test_node"
-            # 设了 name 会把两个都强制改成同名，触发 DDS 同名冲突，
-            # 导致 /height 等订阅在节点之间错乱，状态机判断失败。
             output="screen",
-            parameters=[
-                {
-                    "map_frame": "map",
-                    "laser_link_frame": "laser_link",
-                    "output_topic": "/target_position",
-                    "vision_mode_topic": "/vision_target_mode",
-                    "route_stage_command_topic": "/route_stage_command",
-                    "height_source": height_source,
-                    "laser_array_height_topic": "/height",
-                    "uart_height_topic": "/height_raw",
-                    "position_tolerance_cm": 8.0,
-                    "yaw_tolerance_deg": 8.0,
-                    "height_tolerance_cm": 8.0,
-                    "height_filter_jump_threshold_cm": 30.0,
-                    "height_filter_required_frames": 5,
-                    "use_pillar_detection": use_pillar_detection,
-                    "default_transit_y_cm": default_transit_y_cm,
-                    "pillar_detection_timeout_sec": pillar_detection_timeout_sec,
-                    "emergency_retract_height_threshold_cm": 50.0,
-                    "emergency_retract_z_velocity_threshold_cm_s": 20.0,
-                    "visual_align_pixel_threshold": 35.0,
-                    "visual_align_required_frames": 3,
-                    "visual_takeover_timeout_sec": 15.0,
-                    "fine_data_stale_timeout_sec": 0.13,
-                    # 抓取航点（type=2）参数
-                    "pickup_align_altitude_cm": 33.0,
-                    "pickup_grab_altitude_cm": 18.0,
-                    "pickup_hold_at_grab_sec": 1.0,
-                    "pickup_check_altitude_cm": 60.0,
-                    "pickup_check_observe_sec": 2.0,
-                    "pickup_max_attempts": 3,
-                    "circle_lost_window_sec": 1.0,
-                    # 投放航点（type=3）参数
-                    "drop_altitude_cm": 42.0,
-                    "drop_align_altitude_cm": 50.0,
-                    "drop_servo_up_settle_sec": 1.0,
-                    "drop_servo_down_settle_sec": 1.0,
-                    "drop_servo_retract_delay_sec": 0.5,
-                }
-            ],
+            parameters=[params],
+            additional_env={"DRONE_CONFIG_FILE": str(config_path)},
         )
-    ])
+    ]
+
+
+def generate_launch_description() -> LaunchDescription:
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument(
+                "config_file",
+                default_value=str(resolve_config_path()),
+                description="Single drone configuration YAML.",
+            ),
+            OpaqueFunction(function=_launch_route),
+        ]
+    )

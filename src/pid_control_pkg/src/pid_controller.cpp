@@ -131,6 +131,13 @@ PositionPIDController::PositionPIDController()
   current_y_cm_(0.0),
   current_yaw_deg_(0.0),
   current_z_cm_(0.0),
+  height_min_cm_(0.0),
+  height_max_cm_(200.0),
+  height_filter_jump_threshold_cm_(35.0),
+  height_filter_required_frames_(5),
+  has_height_filter_candidate_(false),
+  height_filter_candidate_cm_(0.0),
+  height_filter_candidate_frames_(0),
   control_frequency_(50.0),
   pose_data_timeout_sec_(0.5),
   map_frame_("map"),
@@ -174,7 +181,7 @@ PositionPIDController::PositionPIDController()
     "/target_position", target_qos,
     std::bind(&PositionPIDController::targetPositionCallback, this, std::placeholders::_1));
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
-    height_topic_, rclcpp::QoS(10),
+    "/height", rclcpp::QoS(10),
     std::bind(&PositionPIDController::heightCallback, this, std::placeholders::_1));
 
   auto takeover_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
@@ -201,9 +208,12 @@ PositionPIDController::PositionPIDController()
 
   RCLCPP_INFO(get_logger(), "Position PID Controller initialized (%.1f Hz)", control_frequency_);
   RCLCPP_INFO(get_logger(), "Frames: map=%s, laser_link=%s", map_frame_.c_str(), laser_link_frame_.c_str());
+  RCLCPP_INFO(get_logger(), "PID height input: UART /height");
   RCLCPP_INFO(
-    get_logger(), "PID height source: %s (topic=%s)",
-    height_source_.c_str(), height_topic_.c_str());
+    get_logger(),
+    "PID height filter: valid_range=[%.1f, %.1f]cm jump_threshold=%.1fcm required_frames=%d",
+    height_min_cm_, height_max_cm_,
+    height_filter_jump_threshold_cm_, height_filter_required_frames_);
 }
 
 void PositionPIDController::targetPositionCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
@@ -226,8 +236,64 @@ void PositionPIDController::targetPositionCallback(const std_msgs::msg::Float32M
 
 void PositionPIDController::heightCallback(const std_msgs::msg::Int16::SharedPtr msg)
 {
-  current_z_cm_ = static_cast<double>(msg->data);
-  has_target_height_ = true;
+  const double raw_height_cm = static_cast<double>(msg->data);
+  const double jump_threshold_cm = std::max(0.0, height_filter_jump_threshold_cm_);
+  const int required_frames = std::max(1, height_filter_required_frames_);
+
+  if (raw_height_cm < height_min_cm_ || raw_height_cm > height_max_cm_) {
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), 1000,
+      "PID rejected out-of-range height: raw=%.1fcm valid_range=[%.1f, %.1f]cm",
+      raw_height_cm, height_min_cm_, height_max_cm_);
+    return;
+  }
+
+  if (!has_target_height_) {
+    current_z_cm_ = raw_height_cm;
+    has_target_height_ = true;
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    return;
+  }
+
+  const double accepted_delta_cm = std::fabs(raw_height_cm - current_z_cm_);
+  if (jump_threshold_cm <= 0.0 || accepted_delta_cm <= jump_threshold_cm || required_frames <= 1) {
+    current_z_cm_ = raw_height_cm;
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    return;
+  }
+
+  if (!has_height_filter_candidate_ ||
+    std::fabs(raw_height_cm - height_filter_candidate_cm_) > jump_threshold_cm)
+  {
+    height_filter_candidate_cm_ = raw_height_cm;
+    height_filter_candidate_frames_ = 1;
+    has_height_filter_candidate_ = true;
+  } else {
+    height_filter_candidate_cm_ = raw_height_cm;
+    ++height_filter_candidate_frames_;
+  }
+
+  if (height_filter_candidate_frames_ >= required_frames) {
+    current_z_cm_ = raw_height_cm;
+    has_height_filter_candidate_ = false;
+    height_filter_candidate_frames_ = 0;
+    pid_z_.reset();
+    RCLCPP_WARN(
+      get_logger(),
+      "PID accepted height jump after %d consecutive frames: %.1fcm",
+      required_frames, current_z_cm_);
+    return;
+  }
+
+  RCLCPP_WARN_THROTTLE(
+    get_logger(), *get_clock(), 1000,
+    "PID filtered height jump raw=%.1fcm accepted=%.1fcm delta=%.1fcm candidate_frames=%d/%d",
+    raw_height_cm, current_z_cm_, accepted_delta_cm,
+    height_filter_candidate_frames_, required_frames);
 }
 
 void PositionPIDController::visualTakeoverCallback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -477,27 +543,15 @@ void PositionPIDController::loadParameters()
     0.1, declare_parameter<double>("pose_data_timeout_sec", 0.5));
   map_frame_ = declare_parameter<std::string>("map_frame", "map");
   laser_link_frame_ = declare_parameter<std::string>("laser_link_frame", "laser_link");
-  height_source_ = declare_parameter<std::string>("height_source", "laser_array");
-  laser_array_height_topic_ =
-    declare_parameter<std::string>("laser_array_height_topic", "/height");
-  uart_height_topic_ = declare_parameter<std::string>("uart_height_topic", "/height_raw");
-  if (height_source_ == "laser_array") {
-    height_topic_ = laser_array_height_topic_;
-  } else if (
-    height_source_ == "uart_to_stm32" ||
-    height_source_ == "uart_to_32" ||
-    height_source_ == "uart")
-  {
-    height_source_ = "uart_to_stm32";
-    height_topic_ = uart_height_topic_;
-  } else {
-    RCLCPP_WARN(
-      get_logger(), "Unknown height_source='%s'; falling back to laser_array.",
-      height_source_.c_str());
-    height_source_ = "laser_array";
-    height_topic_ = laser_array_height_topic_;
+  height_min_cm_ = declare_parameter<double>("height_min_cm", 0.0);
+  height_max_cm_ = declare_parameter<double>("height_max_cm", 200.0);
+  if (height_min_cm_ > height_max_cm_) {
+    std::swap(height_min_cm_, height_max_cm_);
   }
-
+  height_filter_jump_threshold_cm_ =
+    declare_parameter<double>("height_filter_jump_threshold_cm", 35.0);
+  height_filter_required_frames_ =
+    declare_parameter<int>("height_filter_required_frames", 5);
   const double kp_xy = declare_parameter<double>("kp_xy", 0.8);
   const double ki_xy = declare_parameter<double>("ki_xy", 0.0);
   const double kd_xy = declare_parameter<double>("kd_xy", 0.2);

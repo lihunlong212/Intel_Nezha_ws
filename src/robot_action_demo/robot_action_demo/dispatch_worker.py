@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
-import yaml
-from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -21,9 +19,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Empty, String, UInt8
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from my_launch.config_loader import load_drone_config, resolve_config_path
 
-PACKAGE_NAME = "robot_action_demo"
-DEFAULT_CONFIG_NAME = "task_launch_map.yaml"
 ORDERS_TOPIC = "/fleet/orders"
 EVENTS_TOPIC = "/fleet/order_events"
 STATUS_TOPIC = "/fleet/device_status"
@@ -185,13 +182,10 @@ class LocalTelemetryListener:
 
 def parse_args(args: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description="Device worker for dispatch orders.")
-    parser.add_argument("--device-id", default=os.environ.get("DISPATCH_DEVICE_ID", "drone1"))
     parser.add_argument("--device-type", default=os.environ.get("DISPATCH_DEVICE_TYPE", "drone"))
     parser.add_argument("--cargo-item", default=os.environ.get("DISPATCH_CARGO_ITEM", ""))
     parser.add_argument("--cargo-quantity", type=int, default=int(os.environ.get("DISPATCH_CARGO_QTY", "0")))
     parser.add_argument("--status-period", type=float, default=1.0)
-    parser.add_argument("--map-frame", default=os.environ.get("DISPATCH_MAP_FRAME", "map"))
-    parser.add_argument("--robot-frame", default=os.environ.get("DISPATCH_ROBOT_FRAME", "laser_link"))
     parsed, ros_args = parser.parse_known_args(args)
     return parsed, ros_args
 
@@ -205,7 +199,15 @@ class DispatchWorker(Node):
         self._active_task_id = ""
         self._active_cancel = threading.Event()
         self._active_process: subprocess.Popen | None = None
-        self._target_domain_id, self._tasks = self._load_config()
+        (
+            self._config_path,
+            self._target_domain_id,
+            self._tasks,
+            config,
+        ) = self._load_config()
+        self._args.device_id = str(config["drone"]["device_id"])
+        self._args.map_frame = str(config["route"]["map_frame"])
+        self._args.robot_frame = str(config["route"]["laser_link_frame"])
         self._telemetry = LocalTelemetryListener(
             self.get_logger(),
             int(self._target_domain_id),
@@ -418,38 +420,30 @@ class DispatchWorker(Node):
             }
         )
 
-    def _load_config(self) -> tuple[str, dict[str, LaunchTask]]:
+    def _load_config(self) -> tuple[Path, str, dict[str, LaunchTask], dict[str, Any]]:
         config_path = self._get_config_path()
-        with config_path.open("r", encoding="utf-8") as stream:
-            config = yaml.safe_load(stream) or {}
-
-        target_domain_id = str(config.get("target_domain_id", "0"))
-        tasks_config = config.get("tasks", {})
+        config_path, config = load_drone_config(config_path)
+        target_domain_id = str(config["drone"]["device_id"])[-1]
         tasks: dict[str, LaunchTask] = {}
-        for item, task_config in tasks_config.items():
-            package = str(task_config["package"])
-            launch_file = str(task_config["launch_file"])
-            args = [str(arg) for arg in task_config.get("args", [])]
-            tasks[str(item)] = LaunchTask(package=package, launch_file=launch_file, args=args)
-
-        if not tasks:
-            raise RuntimeError(f"no launch tasks configured in {config_path}")
-        return target_domain_id, tasks
+        for item, task_config in config["tasks"].items():
+            tasks[str(item)] = LaunchTask(
+                package="my_launch",
+                launch_file="demo1.launch.py",
+                args=[f"target_square_color:={task_config['target_square_color']}"],
+            )
+        return config_path, target_domain_id, tasks, config
 
     def _get_config_path(self) -> Path:
-        override_path = os.environ.get("DISPATCH_TASK_CONFIG")
+        override_path = os.environ.get("DRONE_CONFIG_FILE")
         if override_path:
             return Path(override_path)
-
-        try:
-            share_dir = Path(get_package_share_directory(PACKAGE_NAME))
-            installed_config = share_dir / "config" / DEFAULT_CONFIG_NAME
-            if installed_config.exists():
-                return installed_config
-        except PackageNotFoundError:
-            pass
-
-        return Path(__file__).resolve().parents[1] / "config" / DEFAULT_CONFIG_NAME
+        legacy_path = os.environ.get("DISPATCH_TASK_CONFIG")
+        if legacy_path:
+            self.get_logger().warning(
+                "DISPATCH_TASK_CONFIG is deprecated; use DRONE_CONFIG_FILE instead."
+            )
+            return Path(legacy_path)
+        return resolve_config_path()
 
     def _select_task(self, item: str) -> LaunchTask | None:
         normalized_item = self._normalize_item(item)
@@ -469,14 +463,15 @@ class DispatchWorker(Node):
     def _start_launch_subprocess(self, task: LaunchTask) -> subprocess.Popen:
         env = os.environ.copy()
         env["ROS_DOMAIN_ID"] = self._target_domain_id
+        command = [*task.command, f"config_file:={self._config_path}"]
         self.get_logger().info(
-            f"starting launch subprocess in domain {self._target_domain_id}: {task.display_command}"
+            f"starting launch subprocess in domain {self._target_domain_id}: {' '.join(command)}"
         )
 
         kwargs: dict[str, Any] = {"env": env}
         if os.name != "nt":
             kwargs["start_new_session"] = True
-        return subprocess.Popen(task.command, **kwargs)
+        return subprocess.Popen(command, **kwargs)
 
     def _stop_subprocess(self, proc: subprocess.Popen) -> None:
         if proc.poll() is not None:

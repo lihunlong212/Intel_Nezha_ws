@@ -123,6 +123,8 @@ private:
   bool has_height_;
   double current_height_cm_;
   double latest_raw_height_cm_;
+  double height_min_cm_;
+  double height_max_cm_;
   double height_filter_jump_threshold_cm_;
   int height_filter_required_frames_;
   bool has_height_filter_candidate_;
@@ -141,10 +143,6 @@ private:
   std::string output_topic_;
   std::string vision_mode_topic_;
   std::string route_stage_command_topic_;
-  std::string height_source_;
-  std::string height_topic_;
-  std::string laser_array_height_topic_;
-  std::string uart_height_topic_;
 
   // 视觉对准参数
   double visual_align_pixel_threshold_;

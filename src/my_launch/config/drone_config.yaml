@@ -1,0 +1,83 @@
+drone:
+  device_id: "drone1"
+  coordination_discovery_sec: 20.0
+
+hardware:
+  # Height always comes from uart_to_stm32 on /height.
+  use_pillar_detection: false
+  pillar_detection_timeout_sec: 20.0
+  fallback_transit_y_cm:
+    drone1: 186.0
+    drone2: -186.0
+    drone3: 186.0
+
+height_filter:
+  min_cm: 0.0
+  max_cm: 200.0
+  jump_threshold_cm: 35.0
+  required_frames: 5
+
+route:
+  map_frame: "map"
+  laser_link_frame: "laser_link"
+  output_topic: "/target_position"
+  vision_mode_topic: "/vision_target_mode"
+  route_stage_command_topic: "/route_stage_command"
+  position_tolerance_cm: 8.0
+  yaw_tolerance_deg: 8.0
+  height_tolerance_cm: 8.0
+  emergency_retract_height_threshold_cm: 50.0
+  emergency_retract_z_velocity_threshold_cm_s: 20.0
+  visual_align_pixel_threshold: 35.0
+  visual_align_required_frames: 3
+  visual_takeover_timeout_sec: 15.0
+  fine_data_stale_timeout_sec: 0.13
+  pickup_align_altitude_cm: 33.0
+  pickup_grab_altitude_cm: 18.0
+  pickup_hold_at_grab_sec: 1.0
+  pickup_check_altitude_cm: 60.0
+  pickup_check_observe_sec: 2.0
+  pickup_max_attempts: 3
+  circle_lost_window_sec: 1.0
+  drop_altitude_cm: 42.0
+  drop_align_altitude_cm: 50.0
+  drop_servo_up_settle_sec: 1.0
+  drop_servo_down_settle_sec: 1.0
+  drop_servo_retract_delay_sec: 0.5
+
+pid:
+  control_frequency: 50.0
+  pose_data_timeout_sec: 0.5
+  map_frame: "map"
+  laser_link_frame: "laser_link"
+  kp_xy: 0.8
+  ki_xy: 0.0
+  kd_xy: 0.2
+  kp_yaw: 1.0
+  ki_yaw: 0.0
+  kd_yaw: 0.2
+  kp_z: 1.0
+  ki_z: 0.0
+  kd_z: 0.2
+  max_linear_velocity: 25.0
+  max_angular_velocity: 25.0
+  max_vertical_velocity: 25.0
+  visual_kp_x: 0.08
+  visual_ki_x: 0.0
+  visual_kd_x: 0.01
+  visual_kp_y: 0.08
+  visual_ki_y: 0.0
+  visual_kd_y: 0.01
+  visual_pixel_deadzone: 5.0
+  visual_max_xy_velocity: 20.0
+  visual_data_timeout_sec: 0.13
+
+tasks:
+  huawei:
+    target_square_color: "red"
+  apple:
+    target_square_color: "black"
+  xiaomi:
+    target_square_color: "blue"
+  "*":
+    target_square_color: "red"

@@ -4,7 +4,6 @@ from collections.abc import Mapping
 
 
 VALID_DEVICE_IDS = ("drone1", "drone2", "drone3")
-VALID_HEIGHT_SOURCES = ("laser_array", "uart_to_stm32")
 PICKUP_RELEASE_STATES = frozenset({"DELIVERING", "DELIVERED", "LANDED"})
 DELIVERY_RELEASE_STATES = frozenset({"DELIVERED", "LANDED"})
 
@@ -14,23 +13,6 @@ def device_priority(device_id: str) -> int:
     if normalized not in VALID_DEVICE_IDS:
         raise ValueError(f"device_id must be one of {VALID_DEVICE_IDS}, got {device_id!r}")
     return int(normalized[-1])
-
-
-def default_transit_y_cm(device_id: str) -> float:
-    priority = device_priority(device_id)
-    return -186.0 if priority == 2 else 186.0
-
-
-def normalize_height_source(height_source: str) -> str:
-    normalized = height_source.strip().lower()
-    if normalized == "laser_array":
-        return normalized
-    if normalized in {"uart_to_stm32", "uart_to_32", "uart"}:
-        return "uart_to_stm32"
-    raise ValueError(
-        f"height_source must be one of {VALID_HEIGHT_SOURCES} "
-        f"(uart_to_32 and uart are aliases), got {height_source!r}"
-    )
 
 
 def select_predecessor(

@@ -90,7 +90,7 @@ bool UartToStm32::initialize(double update_rate, const std::string & source_fram
       std::bind(&UartToStm32::missionCompleteCallback, this, std::placeholders::_1));
 
     delivery_command_pub_ = node_->create_publisher<std_msgs::msg::String>("/delivery_command", rclcpp::QoS(10));
-    height_pub_ = node_->create_publisher<std_msgs::msg::Int16>("/height_raw", 10);
+    height_pub_ = node_->create_publisher<std_msgs::msg::Int16>("/height", 10);
     is_st_ready_pub_ =
       node_->create_publisher<std_msgs::msg::UInt8>("/is_st_ready", rclcpp::QoS(10).transient_local());
     mission_step_pub_ = node_->create_publisher<std_msgs::msg::UInt8>("/mission_step", 10);
@@ -353,7 +353,7 @@ void UartToStm32::protocolDataHandler(uint8_t id, const std::vector<uint8_t> & d
       if (height_pub_) {
         height_pub_->publish(msg);
         RCLCPP_DEBUG_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
-          "Published /height_raw: %d", value);
+          "Published /height: %d", value);
       } else {
         RCLCPP_WARN(node_->get_logger(), "Height publisher not initialized");
       }

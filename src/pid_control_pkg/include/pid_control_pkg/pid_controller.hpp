@@ -110,15 +110,18 @@ private:
   double current_y_cm_;
   double current_yaw_deg_;
   double current_z_cm_;
+  double height_min_cm_;
+  double height_max_cm_;
+  double height_filter_jump_threshold_cm_;
+  int height_filter_required_frames_;
+  bool has_height_filter_candidate_;
+  double height_filter_candidate_cm_;
+  int height_filter_candidate_frames_;
 
   double control_frequency_;
   double pose_data_timeout_sec_;
   std::string map_frame_;
   std::string laser_link_frame_;
-  std::string height_source_;
-  std::string height_topic_;
-  std::string laser_array_height_topic_;
-  std::string uart_height_topic_;
 
   double max_linear_vel_;
   double max_angular_vel_;
