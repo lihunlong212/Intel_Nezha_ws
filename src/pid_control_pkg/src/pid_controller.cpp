@@ -174,7 +174,7 @@ PositionPIDController::PositionPIDController()
     "/target_position", target_qos,
     std::bind(&PositionPIDController::targetPositionCallback, this, std::placeholders::_1));
   height_sub_ = create_subscription<std_msgs::msg::Int16>(
-    "/height", rclcpp::QoS(10),
+    height_topic_, rclcpp::QoS(10),
     std::bind(&PositionPIDController::heightCallback, this, std::placeholders::_1));
 
   auto takeover_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
@@ -201,6 +201,9 @@ PositionPIDController::PositionPIDController()
 
   RCLCPP_INFO(get_logger(), "Position PID Controller initialized (%.1f Hz)", control_frequency_);
   RCLCPP_INFO(get_logger(), "Frames: map=%s, laser_link=%s", map_frame_.c_str(), laser_link_frame_.c_str());
+  RCLCPP_INFO(
+    get_logger(), "PID height source: %s (topic=%s)",
+    height_source_.c_str(), height_topic_.c_str());
 }
 
 void PositionPIDController::targetPositionCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
@@ -474,6 +477,26 @@ void PositionPIDController::loadParameters()
     0.1, declare_parameter<double>("pose_data_timeout_sec", 0.5));
   map_frame_ = declare_parameter<std::string>("map_frame", "map");
   laser_link_frame_ = declare_parameter<std::string>("laser_link_frame", "laser_link");
+  height_source_ = declare_parameter<std::string>("height_source", "laser_array");
+  laser_array_height_topic_ =
+    declare_parameter<std::string>("laser_array_height_topic", "/height");
+  uart_height_topic_ = declare_parameter<std::string>("uart_height_topic", "/height_raw");
+  if (height_source_ == "laser_array") {
+    height_topic_ = laser_array_height_topic_;
+  } else if (
+    height_source_ == "uart_to_stm32" ||
+    height_source_ == "uart_to_32" ||
+    height_source_ == "uart")
+  {
+    height_source_ = "uart_to_stm32";
+    height_topic_ = uart_height_topic_;
+  } else {
+    RCLCPP_WARN(
+      get_logger(), "Unknown height_source='%s'; falling back to laser_array.",
+      height_source_.c_str());
+    height_source_ = "laser_array";
+    height_topic_ = laser_array_height_topic_;
+  }
 
   const double kp_xy = declare_parameter<double>("kp_xy", 0.8);
   const double ki_xy = declare_parameter<double>("ki_xy", 0.0);

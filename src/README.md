@@ -89,6 +89,11 @@ match the device number. A server process accepts only one mission; restart it
 before the next competition run.
 If pillar detection has no valid result before its timeout, drone1/drone3 use
 `transit_y_cm=186` and drone2 uses `transit_y_cm=-186`.
+Set `height_source` in the same YAML independently on each aircraft:
+
+- `laser_array`: use `/height` and start `laser_array_ground_node`.
+- `uart_to_stm32`: use UART `/height_raw` and do not start the laser-array node.
+- `uart_to_32` is accepted as a compatibility alias for `uart_to_stm32`.
 
 Fleet states are `IDLE -> ORDER_ACCEPTED -> PICKING_UP -> DELIVERING -> DELIVERED -> LANDED`.
 The route is released in pickup, delivery, and return stages through the local
@@ -152,5 +157,6 @@ Current serial frame usage:
 ros2 launch pid_control_pkg position_pid_controller.launch.py
 ros2 launch uart_to_stm32 uart_to_stm32.launch.py
 ros2 launch my_launch demo1.launch.py
+ros2 launch my_launch demo1.launch.py height_source:=uart_to_32
 ros2 run robot_action_demo dispatch_receiver
 ```

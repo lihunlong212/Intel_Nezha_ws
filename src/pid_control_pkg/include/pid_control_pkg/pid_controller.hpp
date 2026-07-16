@@ -115,6 +115,10 @@ private:
   double pose_data_timeout_sec_;
   std::string map_frame_;
   std::string laser_link_frame_;
+  std::string height_source_;
+  std::string height_topic_;
+  std::string laser_array_height_topic_;
+  std::string uart_height_topic_;
 
   double max_linear_vel_;
   double max_angular_vel_;

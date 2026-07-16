@@ -23,6 +23,7 @@ from robot_action_demo.coordination import (
     VALID_DEVICE_IDS,
     default_transit_y_cm,
     device_priority,
+    normalize_height_source,
     predecessor_reached,
     select_predecessor,
 )
@@ -72,7 +73,12 @@ class DispatchReceiver(Node):
 
     def __init__(self) -> None:
         super().__init__("dispatch_receiver")
-        configured_device_id, configured_discovery_sec, self._tasks = self._load_config()
+        (
+            configured_device_id,
+            configured_discovery_sec,
+            configured_height_source,
+            self._tasks,
+        ) = self._load_config()
         parameter_device_id = str(
             self.declare_parameter("device_id", configured_device_id).value
         )
@@ -86,6 +92,9 @@ class DispatchReceiver(Node):
 
         self._priority = device_priority(self._device_id)
         self._target_domain_id = str(self._priority)
+        self._height_source = normalize_height_source(
+            os.environ.get("DISPATCH_HEIGHT_SOURCE", configured_height_source)
+        )
         self._coordination_discovery_sec = max(
             0.0,
             float(
@@ -145,6 +154,7 @@ class DispatchReceiver(Node):
         self.get_logger().info(
             f"dispatch receiver ready for {self._device_id}; fleet_domain={fleet_domain}, "
             f"local_domain={self._target_domain_id}, "
+            f"height_source={self._height_source}, "
             f"discovery={self._coordination_discovery_sec:.1f}s"
         )
 
@@ -555,13 +565,14 @@ class DispatchReceiver(Node):
         with self._peer_condition:
             self._peer_condition.notify_all()
 
-    def _load_config(self) -> tuple[str, float, dict[str, LaunchTask]]:
+    def _load_config(self) -> tuple[str, float, str, dict[str, LaunchTask]]:
         config_path = self._get_config_path()
         with config_path.open("r", encoding="utf-8") as stream:
             config = yaml.safe_load(stream) or {}
 
         device_id = str(config.get("device_id", "drone1"))
         discovery_sec = float(config.get("coordination_discovery_sec", 20.0))
+        height_source = str(config.get("height_source", "laser_array"))
         tasks: dict[str, LaunchTask] = {}
         for item, task_config in (config.get("tasks") or {}).items():
             tasks[str(item)] = LaunchTask(
@@ -571,7 +582,7 @@ class DispatchReceiver(Node):
             )
         if not tasks:
             raise RuntimeError(f"no launch tasks configured in {config_path}")
-        return device_id, discovery_sec, tasks
+        return device_id, discovery_sec, height_source, tasks
 
     def _get_config_path(self) -> Path:
         override_path = os.environ.get("DISPATCH_TASK_CONFIG")
@@ -617,10 +628,12 @@ class DispatchReceiver(Node):
         command = [
             *task.command,
             f"default_transit_y_cm:={transit_y_cm:.1f}",
+            f"height_source:={self._height_source}",
         ]
         self.get_logger().info(
             f"starting local mission in domain {self._target_domain_id}, "
-            f"fallback transit_y={transit_y_cm:.1f}cm: {' '.join(command)}"
+            f"fallback transit_y={transit_y_cm:.1f}cm, "
+            f"height_source={self._height_source}: {' '.join(command)}"
         )
         kwargs: dict[str, object] = {"env": env}
         if os.name != "nt":

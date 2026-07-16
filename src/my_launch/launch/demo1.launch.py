@@ -4,7 +4,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -18,6 +18,7 @@ def generate_launch_description() -> LaunchDescription:
     use_pillar_detection = LaunchConfiguration("use_pillar_detection")
     default_transit_y_cm = LaunchConfiguration("default_transit_y_cm")
     pillar_detection_timeout_sec = LaunchConfiguration("pillar_detection_timeout_sec")
+    height_source = LaunchConfiguration("height_source")
 
     fly_carto_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(_package_launch("my_carto_pkg", "fly_carto.launch.py"))
@@ -28,7 +29,16 @@ def generate_launch_description() -> LaunchDescription:
     laser_array_ground_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             _package_launch("laser_array_pkg", "laser_array_ground.launch.py")
-        )
+        ),
+        condition=IfCondition(
+            PythonExpression(
+                [
+                    "'",
+                    height_source,
+                    "' not in ['uart_to_stm32', 'uart_to_32', 'uart']",
+                ]
+            )
+        ),
     )
     pillar_detector_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -39,7 +49,8 @@ def generate_launch_description() -> LaunchDescription:
     position_pid_controller_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             _package_launch("pid_control_pkg", "position_pid_controller.launch.py")
-        )
+        ),
+        launch_arguments={"height_source": height_source}.items(),
     )
     route_test_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(_package_launch("activity_control_pkg", "route_test.launch.py")),
@@ -47,6 +58,7 @@ def generate_launch_description() -> LaunchDescription:
             "use_pillar_detection": use_pillar_detection,
             "default_transit_y_cm": default_transit_y_cm,
             "pillar_detection_timeout_sec": pillar_detection_timeout_sec,
+            "height_source": height_source,
         }.items(),
     )
     camera_launch = IncludeLaunchDescription(
@@ -77,6 +89,11 @@ def generate_launch_description() -> LaunchDescription:
                 "pillar_detection_timeout_sec",
                 default_value="20.0",
                 description="Pillar detection timeout before using fallback transit Y.",
+            ),
+            DeclareLaunchArgument(
+                "height_source",
+                default_value="laser_array",
+                description="Height source: laser_array or uart_to_stm32 (uart_to_32 alias supported).",
             ),
             fly_carto_launch,
             TimerAction(period=2.0, actions=[uart_to_stm32_launch]),

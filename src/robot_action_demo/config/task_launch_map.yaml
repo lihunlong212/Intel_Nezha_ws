@@ -1,5 +1,7 @@
 device_id: "drone1"
 coordination_discovery_sec: 20.0
+# Use "uart_to_stm32" ("uart_to_32" is also accepted) on drones without laser_array.
+height_source: "laser_array"
 tasks:
   huawei:
     package: "my_launch"

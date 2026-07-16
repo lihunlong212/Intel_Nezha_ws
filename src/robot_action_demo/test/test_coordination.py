@@ -3,6 +3,7 @@ from robot_action_demo.coordination import (
     PICKUP_RELEASE_STATES,
     default_transit_y_cm,
     device_priority,
+    normalize_height_source,
     predecessor_reached,
     select_predecessor,
 )
@@ -18,6 +19,13 @@ def test_default_transit_y_depends_on_drone_number():
     assert default_transit_y_cm("drone1") == 186.0
     assert default_transit_y_cm("drone2") == -186.0
     assert default_transit_y_cm("drone3") == 186.0
+
+
+def test_height_source_aliases_are_normalized():
+    assert normalize_height_source("laser_array") == "laser_array"
+    assert normalize_height_source("uart_to_stm32") == "uart_to_stm32"
+    assert normalize_height_source("uart_to_32") == "uart_to_stm32"
+    assert normalize_height_source("UART") == "uart_to_stm32"
 
 
 def test_drone3_uses_nearest_busy_predecessor():

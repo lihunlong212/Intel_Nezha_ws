@@ -146,12 +146,19 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     declare_parameter("route_stage_command_topic", "/route_stage_command");
   // Height source interface. Both sources use std_msgs/Int16 in centimetres.
   // Set height_source to "laser_array" (default) or "uart_to_stm32".
+  // "uart_to_32" and "uart" are accepted as aliases for compatibility.
+  // "uart_to_32" is accepted as a compatibility alias.
   height_source_ = declare_parameter("height_source", "laser_array");
   laser_array_height_topic_ = declare_parameter("laser_array_height_topic", "/height");
   uart_height_topic_ = declare_parameter("uart_height_topic", "/height_raw");
   if (height_source_ == "laser_array") {
     height_topic_ = laser_array_height_topic_;
-  } else if (height_source_ == "uart_to_stm32") {
+  } else if (
+    height_source_ == "uart_to_stm32" ||
+    height_source_ == "uart_to_32" ||
+    height_source_ == "uart")
+  {
+    height_source_ = "uart_to_stm32";
     height_topic_ = uart_height_topic_;
   } else {
     RCLCPP_WARN(

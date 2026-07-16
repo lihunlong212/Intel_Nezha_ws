@@ -29,7 +29,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "height_source",
             default_value="laser_array",
-            description="Height source: laser_array (/height) or uart_to_stm32 (/height_raw).",
+            description=(
+                "Height source: laser_array (/height) or uart_to_stm32/uart_to_32 "
+                "(/height_raw)."
+            ),
         ),
         DeclareLaunchArgument(
             "default_transit_y_cm",

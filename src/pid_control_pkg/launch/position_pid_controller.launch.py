@@ -1,8 +1,11 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description() -> LaunchDescription:
+    height_source = LaunchConfiguration("height_source")
     pid_params = {
         # 控制循环与 TF 坐标系
         "control_frequency": 50.0,         # PID 更新频率，单位 Hz
@@ -39,9 +42,17 @@ def generate_launch_description() -> LaunchDescription:
         "visual_pixel_deadzone": 5.0,      # 像素死区
         "visual_max_xy_velocity": 20.0,    # 接管期间 XY 最大速度，单位 cm/s
         "visual_data_timeout_sec": 0.13,   # fine_data 超时后将 XY 保持为 0，单位秒
+        "height_source": height_source,
+        "laser_array_height_topic": "/height",
+        "uart_height_topic": "/height_raw",
     }
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "height_source",
+            default_value="laser_array",
+            description="Height source: laser_array or uart_to_stm32 (uart_to_32 alias supported).",
+        ),
         Node(
             package="pid_control_pkg",
             executable="position_pid_controller",
