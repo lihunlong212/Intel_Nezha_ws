@@ -100,6 +100,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   emergency_retract_height_threshold_cm_(0.0),
   emergency_retract_z_velocity_threshold_cm_s_(0.0),
   emergency_servo_retract_active_(false),
+  cargo_transport_active_(false),
   visual_align_pixel_threshold_(0.0),
   visual_align_required_frames_(0),
   visual_takeover_timeout_sec_(0.0),
@@ -525,6 +526,7 @@ void RouteTargetPublisherNode::targetVelocityCallback(
   const bool protection_condition =
     has_height_ &&
     !isPickupOrDropPhase(phase_) &&
+    !cargo_transport_active_ &&
     latest_raw_height_cm_ < emergency_retract_height_threshold_cm_ &&
     target_vz_cm_s > emergency_retract_z_velocity_threshold_cm_s_;
 
@@ -665,6 +667,7 @@ void RouteTargetPublisherNode::startDropFailureReturn(
   const rclcpp::Time & now_time,
   double landing_yaw_deg)
 {
+  cargo_transport_active_ = false;
   publishServoControl(kServoUp);
   has_aligned_position_ = false;
   drop_failure_return_active_ = true;
@@ -712,6 +715,7 @@ void RouteTargetPublisherNode::startDropFailureReturn(
 
 void RouteTargetPublisherNode::startSearchFailureReturn(const rclcpp::Time & now_time)
 {
+  cargo_transport_active_ = false;
   targets_.resize(current_idx_ + 1);
   targets_.push_back(
     Target{
@@ -749,6 +753,7 @@ void RouteTargetPublisherNode::startSearchFailureReturn(const rclcpp::Time & now
 
 void RouteTargetPublisherNode::startPickupFailureReturn(const rclcpp::Time & now_time)
 {
+  cargo_transport_active_ = false;
   publishElectromagnetControl(0x00);
   publishServoControl(kServoUp);
 
@@ -969,6 +974,8 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   }
 
   if (phase == TaskPhase::DropArriving) {
+    // 货物运输阶段保持抓取臂下放；只有真正到达投放航点后才收起并开始视觉对准。
+    cargo_transport_active_ = false;
     publishServoControl(kServoUp);
     RCLCPP_INFO(
       get_logger(),
@@ -1323,8 +1330,13 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         const double climb_x_cm = has_aligned_position_ ? aligned_x_cm_ : x_cm;
         const double climb_y_cm = has_aligned_position_ ? aligned_y_cm_ : y_cm;
         const double climb_yaw_deg = target.yaw_deg;
-        // 抓取完成后进入安全爬升，舵机必须保持收起。
-        publishServoControl(kServoUp);
+        // 检查确认抓取成功后重新下放抓取臂，并在整个送货航段保持该姿态。
+        // 到达投放航点进入 DropArriving 后才会发送 kServoUp。
+        cargo_transport_active_ = true;
+        publishServoControl(kServoPickupDown);
+        RCLCPP_INFO(
+          get_logger(),
+          "Pickup confirmed: servo pickup-down commanded for cargo transport.");
         insertPostPickupClimbTarget(climb_x_cm, climb_y_cm, climb_yaw_deg);
         // 通知 action server：抓取完成，进入送货阶段
         if (pickup_done_pub_) {
@@ -1606,7 +1618,7 @@ std::vector<Target> RouteTestNode::buildRoute(double transit_y_cm) const
 {
   return std::vector<Target>{
     Target{0.0, 0.0, 80.0, 0.0, kTargetTypeWaypoint, kRouteStagePickup},
-    Target{0.0, 300.0, 80.0, 0.0, kTargetTypeSearch, kRouteStagePickup},
+    Target{0.0, 140.0, 80.0, 0.0, kTargetTypeSearch, kRouteStagePickup},
     Target{0.0, transit_y_cm, 120.0, 0.0, kTargetTypeWaypoint, kRouteStagePickup},
 
 

@@ -44,9 +44,10 @@ route:
   # 航点到达判定容差：水平距离（cm）、偏航角（deg）、高度（cm）。
   position_tolerance_cm: 8.0
   yaw_tolerance_deg: 8.0
-  height_tolerance_cm: 8.0
+  height_tolerance_cm: 5.0
 
-  # 非抓取/投放阶段的应急收舵机条件：高度低于前者，且目标上升速度大于后者。
+  # 非抓取/投放且未携货时的应急收舵机条件；携货送货过程中不会提前收臂。
+  # 当高度低于前者且目标上升速度大于后者时，发送舵机收起指令。
   emergency_retract_height_threshold_cm: 50.0
   emergency_retract_z_velocity_threshold_cm_s: 20.0
 
@@ -61,7 +62,7 @@ route:
   # ===== 抓取流程 =====
   # 颜色块精对准高度与最终抓取下降高度（cm）。
   pickup_align_altitude_cm: 33.0
-  pickup_grab_altitude_cm: 18.0
+  pickup_grab_altitude_cm: 15.0
   # 到达抓取高度后，电磁铁通电并保持的时间（秒）。
   pickup_hold_at_grab_sec: 1.0
   # 抓取后上升到此高度检查颜色块是否仍在地面（cm）。
