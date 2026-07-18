@@ -25,6 +25,9 @@ constexpr double kDefaultTimerPeriodSec = 0.05;
 constexpr uint8_t kVisionModeIdle = 0;
 constexpr uint8_t kVisionModeColorSquare = 1;
 constexpr uint8_t kVisionModeAprilTag = 2;
+constexpr uint8_t kServoUp = 0x00;
+constexpr uint8_t kServoPickupDown = 0x01;
+constexpr uint8_t kServoDropDown = 0x02;
 constexpr int kTargetTypeWaypoint = 1;
 constexpr int kTargetTypePickup = 2;
 constexpr int kTargetTypeDrop = 3;
@@ -535,7 +538,7 @@ void RouteTargetPublisherNode::targetVelocityCallback(
   }
 
   emergency_servo_retract_active_ = true;
-  publishServoControl(0x00);
+  publishServoControl(kServoUp);
   RCLCPP_ERROR(
     get_logger(),
     "Emergency landing protection: servo UP commanded (phase=%s height=%.1fcm target_vz=%.1fcm/s)",
@@ -662,7 +665,7 @@ void RouteTargetPublisherNode::startDropFailureReturn(
   const rclcpp::Time & now_time,
   double landing_yaw_deg)
 {
-  publishServoControl(0x00);
+  publishServoControl(kServoUp);
   has_aligned_position_ = false;
   drop_failure_return_active_ = true;
   mission_complete_sent_ = false;
@@ -747,7 +750,7 @@ void RouteTargetPublisherNode::startSearchFailureReturn(const rclcpp::Time & now
 void RouteTargetPublisherNode::startPickupFailureReturn(const rclcpp::Time & now_time)
 {
   publishElectromagnetControl(0x00);
-  publishServoControl(0x00);
+  publishServoControl(kServoUp);
 
   if (pickup_failed_pub_) {
     std_msgs::msg::Empty empty_msg;
@@ -966,13 +969,13 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   }
 
   if (phase == TaskPhase::DropArriving) {
-    publishServoControl(0x00);
+    publishServoControl(kServoUp);
     RCLCPP_INFO(
       get_logger(),
       "DropArriving: servo UP before descending to %.1fcm align height; waiting %.2fs",
       drop_align_altitude_cm_, drop_servo_up_settle_sec_);
   } else if (phase == TaskPhase::DropServoSettling) {
-    publishServoControl(0x01);
+    publishServoControl(kServoDropDown);
     RCLCPP_INFO(
       get_logger(),
       "DropServoSettling: servo DOWN at %.1fcm; holding XY velocity at zero for %.2fs before descent",
@@ -1208,7 +1211,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           "Pickup alignment timed out for target %zu after %.1fs (attempt %d/%d). Giving up.",
           current_idx_, phase_elapsed, pickup_attempts_ + 1, pickup_max_attempts_);
         publishElectromagnetControl(0x00);
-        publishServoControl(0x00);
+        publishServoControl(kServoUp);
         has_aligned_position_ = false;  // 超时跳过，清掉锁�?
         pickup_attempts_ = std::max(pickup_attempts_ + 1, pickup_max_attempts_);
         startPickupFailureReturn(now_time);
@@ -1253,7 +1256,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
             aligned_x_cm_, aligned_y_cm_);
           // 电磁铁通电（仅此一次，整个抓取期间保持通电），舵机下放，开始下降到抓取高度
           publishElectromagnetControl(0x01);
-          publishServoControl(0x01);
+          publishServoControl(kServoPickupDown);
           setPhase(TaskPhase::PickupDescending, now_time);
         }
       } else {
@@ -1281,7 +1284,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         current_idx_, phase_elapsed, pickup_hold_at_grab_sec_);
       if (phase_elapsed >= pickup_hold_at_grab_sec_) {
         // 抓住后舵机收起开始上升；电磁铁保持通电不变
-        publishServoControl(0x00);
+        publishServoControl(kServoUp);
         setPhase(TaskPhase::PickupAscending, now_time);
       }
       return;
@@ -1320,7 +1323,8 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         const double climb_x_cm = has_aligned_position_ ? aligned_x_cm_ : x_cm;
         const double climb_y_cm = has_aligned_position_ ? aligned_y_cm_ : y_cm;
         const double climb_yaw_deg = target.yaw_deg;
-        publishServoControl(0x01);
+        // 抓取完成后进入安全爬升，舵机必须保持收起。
+        publishServoControl(kServoUp);
         insertPostPickupClimbTarget(climb_x_cm, climb_y_cm, climb_yaw_deg);
         // 通知 action server：抓取完成，进入送货阶段
         if (pickup_done_pub_) {
@@ -1452,7 +1456,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         current_idx_, phase_elapsed, drop_servo_retract_delay_sec_);
 
       if (phase_elapsed >= drop_servo_retract_delay_sec_) {
-        publishServoControl(0x00);
+        publishServoControl(kServoUp);
         RCLCPP_INFO(get_logger(), "Drop completed at target %zu. Advancing.", current_idx_);
         // 通知 action server：投递完成，整个任务结束
         if (drop_done_pub_) {

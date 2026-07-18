@@ -396,12 +396,26 @@ void UartToStm32::sendServoToSerial(uint8_t state)
 
   std::vector<uint8_t> data(1, state);
   if (serial_comm_->send_protocol_data(SERVO_FRAME_ID, static_cast<uint8_t>(data.size()), data)) {
+    const char * action = "unknown";
+    switch (state) {
+      case 0x00:
+        action = "up";
+        break;
+      case 0x01:
+        action = "pickup down";
+        break;
+      case 0x02:
+        action = "drop down";
+        break;
+      default:
+        break;
+    }
     RCLCPP_INFO(
       node_->get_logger(),
       "Sent servo frame: id=0x%02X state=0x%02X (%s)",
       static_cast<unsigned>(SERVO_FRAME_ID),
       static_cast<unsigned>(state),
-      state == 0x01 ? "down" : "up");
+      action);
   } else {
     RCLCPP_WARN(
       node_->get_logger(),

@@ -1,83 +1,139 @@
+# 本文件是每架无人机唯一的常用参数入口。
+# 修改后需要重新启动 launch/dispatch_server 才会生效；长度默认用 cm，时间用 s。
+
 drone:
+  # 本机编号：只能填写 drone1、drone2、drone3。
+  # 它同时决定协同优先级、本地飞控 Domain（分别为 1/2/3）和默认绕柱 Y 坐标。
   device_id: "drone1"
+  # 接单后收集其他无人机状态、确定固定前驱的时间窗口（秒）。drone1 无前驱。
   coordination_discovery_sec: 20.0
 
 hardware:
-  # Height always comes from uart_to_stm32 on /height.
+  # 高度源已固定为 uart_to_stm32 发布的 /height，不再启动或使用 laser_array。
+  # true：等待柱子识别结果计算 transit_y；false：直接使用下方本机默认值。
   use_pillar_detection: false
+  # 开启柱子识别后允许等待的最长时间；超时则使用 fallback_transit_y_cm。
   pillar_detection_timeout_sec: 20.0
+  # 未识别到柱子时，各无人机送货绕行航点的 Y 坐标（cm）。
   fallback_transit_y_cm:
     drone1: 186.0
     drone2: -186.0
     drone3: 186.0
 
 height_filter:
+  # /height 合法范围（cm）；范围外的数据直接丢弃。
   min_cm: 0.0
   max_cm: 200.0
+  # 新高度与当前已接受高度相差超过此值时，视为跳变（cm）。
   jump_threshold_cm: 35.0
+  # 跳变数据必须连续稳定出现这么多帧才会被接受。
   required_frames: 5
 
 route:
+  # TF 全局坐标系。
   map_frame: "map"
+  # 无人机位姿所使用的 TF 子坐标系；只是历史命名，不是高度源，也不会启动 laser_array。
   laser_link_frame: "laser_link"
+  # 路线节点发送 [x_cm, y_cm, z_cm, yaw_deg] 目标的位置话题。
   output_topic: "/target_position"
+  # 视觉模式：0=关闭，1=颜色块，2=AprilTag。
   vision_mode_topic: "/vision_target_mode"
+  # 航段放行命令：0=暂停，1=抓货，2=送货，3=返航。
   route_stage_command_topic: "/route_stage_command"
+
+  # 航点到达判定容差：水平距离（cm）、偏航角（deg）、高度（cm）。
   position_tolerance_cm: 8.0
   yaw_tolerance_deg: 8.0
   height_tolerance_cm: 8.0
+
+  # 非抓取/投放阶段的应急收舵机条件：高度低于前者，且目标上升速度大于后者。
   emergency_retract_height_threshold_cm: 50.0
   emergency_retract_z_velocity_threshold_cm_s: 20.0
+
+  # 视觉误差半径小于该像素值，并连续满足 required_frames 帧，才算对准。
   visual_align_pixel_threshold: 35.0
   visual_align_required_frames: 3
+  # 单次视觉接管/对准的超时时间（秒）。
   visual_takeover_timeout_sec: 15.0
+  # /fine_data 超过该时间未更新就判为过期（秒），应略大于相机帧周期。
   fine_data_stale_timeout_sec: 0.13
+
+  # ===== 抓取流程 =====
+  # 颜色块精对准高度与最终抓取下降高度（cm）。
   pickup_align_altitude_cm: 33.0
   pickup_grab_altitude_cm: 18.0
+  # 到达抓取高度后，电磁铁通电并保持的时间（秒）。
   pickup_hold_at_grab_sec: 1.0
+  # 抓取后上升到此高度检查颜色块是否仍在地面（cm）。
   pickup_check_altitude_cm: 60.0
+  # 在检查高度观察颜色块的时间（秒）；未再看到色块判定抓取成功。
   pickup_check_observe_sec: 2.0
+  # 最大抓取次数，达到后进入抓取失败返航。
   pickup_max_attempts: 3
+  # 兼容保留的目标丢失窗口（秒）；当前抓取成功主要由上面的观察时间判定。
   circle_lost_window_sec: 1.0
+
+  # ===== 投放流程 =====
+  # 实际断开电磁铁的投放高度，以及 AprilTag 精对准高度（cm）。
   drop_altitude_cm: 42.0
   drop_align_altitude_cm: 50.0
+  # 到达投放点后先收起舵机并等待的时间（秒）。
   drop_servo_up_settle_sec: 1.0
+  # AprilTag 对准后发送投放下放指令 0x02，并等待舵机到位的时间（秒）。
   drop_servo_down_settle_sec: 1.0
+  # 投放断磁后等待多久发送舵机收起指令 0x00（秒）。
   drop_servo_retract_delay_sec: 0.5
 
 pid:
+  # PID计算和 /target_velocity 发布频率（Hz）。
   control_frequency: 50.0
+  # TF位姿超过该时间未更新时停止输出运动速度（秒）。
   pose_data_timeout_sec: 0.5
+  # 必须与 route 中的两个 TF 坐标系保持一致。
   map_frame: "map"
   laser_link_frame: "laser_link"
+
+  # 水平位置 PID：Kp/Ki/Kd。通常先调 Kp，再少量增加 Kd 抑制振荡。
   kp_xy: 0.8
   ki_xy: 0.0
   kd_xy: 0.2
+  # 偏航角 PID。
   kp_yaw: 1.0
   ki_yaw: 0.0
   kd_yaw: 0.2
+  # 高度 PID。
   kp_z: 1.0
   ki_z: 0.0
   kd_z: 0.2
+
+  # 输出限幅：水平/垂直为 cm/s，角速度为 deg/s。
   max_linear_velocity: 25.0
   max_angular_velocity: 25.0
+  # 当前代码限制最大上升速度；下降方向另有内部安全下限。
   max_vertical_velocity: 25.0
+
+  # 视觉像素误差 PID，分别控制图像 X/Y 对应的水平速度。
   visual_kp_x: 0.08
   visual_ki_x: 0.0
   visual_kd_x: 0.01
   visual_kp_y: 0.08
   visual_ki_y: 0.0
   visual_kd_y: 0.01
+  # 像素误差绝对值小于该值时不修正，避免中心附近抖动（px）。
   visual_pixel_deadzone: 5.0
+  # 视觉接管期间单轴最大水平修正速度（cm/s）。
   visual_max_xy_velocity: 20.0
+  # PID侧 /fine_data 过期时间（秒），建议与 route 的 stale timeout 保持一致。
   visual_data_timeout_sec: 0.13
 
 tasks:
+  # 订单商品名到识别颜色的映射；允许颜色：red、black、blue。
   huawei:
     target_square_color: "red"
   apple:
     target_square_color: "black"
   xiaomi:
     target_square_color: "blue"
+  # 未明确配置的商品使用此兜底颜色；该项不能删除。
   "*":
     target_square_color: "red"

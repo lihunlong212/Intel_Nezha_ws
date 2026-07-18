@@ -81,7 +81,8 @@ private:
   static constexpr uint8_t VELOCITY_FRAME_ID = 0x32;
   static constexpr uint8_t TARGET_VELOCITY_FRAME_ID = 0x31;
   static constexpr uint8_t ST_READY_QUERY_ID = 0xF1;
-  static constexpr uint8_t SERVO_FRAME_ID = 0x11;          // 0x01=放下, 0x00=收起
+  // Servo payload: 0x00=收起, 0x01=抓取下放, 0x02=投放下放
+  static constexpr uint8_t SERVO_FRAME_ID = 0x11;
   static constexpr uint8_t ELECTROMAGNET_FRAME_ID = 0x33;  // 0x01=通电, 0x00=断电
   static constexpr uint8_t MISSION_COMPLETE_FRAME_ID = 0x66;
   static constexpr uint8_t MISSION_COMPLETE_VALUE = 0x06;
