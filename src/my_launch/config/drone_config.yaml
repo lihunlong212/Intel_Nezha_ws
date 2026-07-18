@@ -46,8 +46,8 @@ route:
   yaw_tolerance_deg: 8.0
   height_tolerance_cm: 5.0
 
-  # 非抓取/投放且未携货时的应急收舵机条件；携货送货过程中不会提前收臂。
-  # 当高度低于前者且目标上升速度大于后者时，发送舵机收起指令。
+  # 应急收舵机仅在抓取流程（对准到抓取结果判断完成）中禁用。
+  # 其他阶段包括送货和投放：高度低于前者且目标上升速度大于后者时发送收起指令。
   emergency_retract_height_threshold_cm: 50.0
   emergency_retract_z_velocity_threshold_cm_s: 20.0
 

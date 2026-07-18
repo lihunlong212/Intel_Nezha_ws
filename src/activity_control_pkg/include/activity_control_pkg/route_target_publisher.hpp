@@ -137,7 +137,6 @@ private:
   double emergency_retract_height_threshold_cm_;
   double emergency_retract_z_velocity_threshold_cm_s_;
   bool emergency_servo_retract_active_;
-  bool cargo_transport_active_;
 
   std::string map_frame_;
   std::string laser_link_frame_;
