@@ -290,6 +290,14 @@ void PillarDetectorNode::publishPillars(const std::vector<Cluster> & pillars)
   detected_pillars_pub_->publish(detected_msg);
   pillar_position_pub_->publish(position_msg);
 
+  RCLCPP_INFO(
+    get_logger(),
+    "Pillar detection complete: count=%zu; published /detected_pillars and /pillar_position.",
+    sorted_pillars.size());
+
+  // Keep the old detailed table available in source, but hide it from normal terminal output.
+  if (false) {
+
   RCLCPP_INFO(get_logger(), " ");
   RCLCPP_INFO(get_logger(), "╔══════════════════════════════════════════╗");
   RCLCPP_INFO(get_logger(), "║         柱子检测结果（共 %zu 个）          ║", pillars.size());
@@ -313,6 +321,7 @@ void PillarDetectorNode::publishPillars(const std::vector<Cluster> & pillars)
   RCLCPP_INFO(get_logger(), "║  /pillar_position: [x1,y1,x2,y2,...]   ║");
   RCLCPP_INFO(get_logger(), "╚══════════════════════════════════════════╝");
   RCLCPP_INFO(get_logger(), " ");
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -330,13 +339,13 @@ void PillarDetectorNode::scanCallback(const sensor_msgs::msg::LaserScan::SharedP
 
   for (const auto & d : frame_dets) { accumulated_.push_back(d); }
 
-  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+  RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 5000,
     "帧 %d/%d  本帧候选=%zu  累积=%zu",
     frame_count_, accumulation_frames_, frame_dets.size(), accumulated_.size());
 
   if (frame_count_ >= accumulation_frames_) {
     done_ = true;
-    RCLCPP_INFO(get_logger(),
+    RCLCPP_DEBUG(get_logger(),
       "累积完成（%d 帧，%zu 个候选点），开始聚类...",
       frame_count_, accumulated_.size());
     publishPillars(clusterDetections(accumulated_));

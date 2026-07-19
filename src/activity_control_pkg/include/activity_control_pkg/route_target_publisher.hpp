@@ -41,7 +41,7 @@ enum class TaskPhase
   PickupDescending,  // 抓取：magnet=01 + servo=01 已发，视觉微调 XY 并下降到抓取高度
   PickupHolding,     // 抓取：在抓取高度悬停一段时间，让磁铁吸住货物
   PickupAscending,   // 抓取：servo=00 已发，上升回 50cm（电磁铁仍通电吸住货物）
-  PickupObserving,   // 抓取：观察 1s，看 /fine_data 是否还有黑色正方形片来判定成败
+  PickupObserving,   // 抓取：观察目标 AprilTag 是否仍可见来判定成败
   DropArriving,      // 投放：到点后收舵机，等待后下降到对准高度
   DropAligning,      // 投放：在对准高度使用 AprilTag 视觉对准
   DropServoSettling, // 投放：舵机下放后在对准高度等待
@@ -73,9 +73,11 @@ private:
   void targetVelocityCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg);
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
   void advanceToNextTarget();
-  void startDropFailureReturn(const rclcpp::Time & now_time, double landing_yaw_deg);
-  void startSearchFailureReturn(const rclcpp::Time & now_time);
-  void startPickupFailureReturn(const rclcpp::Time & now_time);
+  void enterFailureHold(
+    const rclcpp::Time & now_time, const char * reason, bool drop_failure);
+  void startDropFailureHold(const rclcpp::Time & now_time);
+  void startSearchFailureHold(const rclcpp::Time & now_time);
+  void startPickupFailureHold(const rclcpp::Time & now_time);
   void insertPostPickupClimbTarget(double x_cm, double y_cm, double yaw_deg);
   void removePendingSearchTargetsAfterCurrent();
   bool hasPendingSearchTargetsAfterCurrent() const;
@@ -83,6 +85,7 @@ private:
   void publishIdleVisionModeForCurrentTarget();
   void publishVisualTakeoverState(bool active);
   void publishXyVelocityHoldState(bool active);
+  void publishFailureHoldState(bool active);
   void publishVisionTargetMode(uint8_t mode);
   void publishServoControl(uint8_t state);
   void publishElectromagnetControl(uint8_t state);
@@ -98,6 +101,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr active_controller_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr visual_takeover_active_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr xy_velocity_hold_active_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr failure_hold_active_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr vision_target_mode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr servo_control_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr electromagnet_control_pub_;
@@ -158,7 +162,8 @@ private:
   double pickup_check_observe_sec_;        // 判断高度观察窗口（默认 2.0s）
   double pickup_observe_sec_;              // 兼容旧参数；当前判断窗口由 pickup_check_observe_sec 控制
   int pickup_max_attempts_;                // 抓取最大重试次数（默认 3）
-  double circle_lost_window_sec_;          // /fine_data 多久没新消息算"黑色正方形片消失"（默认 1.0s）
+  double circle_lost_window_sec_;          // 兼容旧参数
+  double post_pickup_climb_altitude_cm_;
 
   // 投放参数（独立时序，不受抓取参数影响）
   double drop_altitude_cm_;                // 投放释放高度
@@ -177,7 +182,7 @@ private:
   rclcpp::Time last_fine_data_time_;
 
   bool mission_complete_sent_;
-  bool drop_failure_return_active_;
+  bool failure_hold_active_;
 
   int aligned_frame_count_;
   rclcpp::Time visual_takeover_start_time_;
@@ -191,7 +196,7 @@ private:
   bool magnet_sent_in_phase_;              // 当前 *Acting 阶段是否已经发过电磁铁帧
 
   // 抓取对准成功时记录的实际位置（用于下降/悬停/上升锁位 + 重试回位）
-  // 因为黑色正方形片实物可能不完全在航点 xy，对准后用真实位置代替航点坐标
+  // 目标 AprilTag 可能不完全在航点 xy，对准后用真实位置代替航点坐标
   double aligned_x_cm_;
   double aligned_y_cm_;
   bool has_aligned_position_;
@@ -217,9 +222,18 @@ private:
   rclcpp::TimerBase::SharedPtr pillar_detection_timeout_timer_;
   std::mutex route_load_mutex_;
   bool use_pillar_detection_ = true;
+  std::string device_id_ = "drone1";
+  std::string destination_key_ = "delivery_point_1";
   double default_transit_y_cm_ = 186.0;
   double pillar_detection_timeout_sec_ = 20.0;
   bool route_loaded_ = false;
+  std::vector<double> mission_x_cm_;
+  std::vector<double> mission_y_cm_;
+  std::vector<double> mission_z_cm_;
+  std::vector<double> mission_yaw_deg_;
+  std::vector<bool> mission_use_transit_y_;
+  std::vector<int64_t> mission_type_;
+  std::vector<int64_t> mission_stage_;
 };
 
 }  // namespace activity_control_pkg

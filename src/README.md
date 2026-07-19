@@ -62,7 +62,9 @@ Visual takeover topics:
 
 ### `drone_camera_pkg`
 
-Runs camera preview and black-circle detection, then publishes:
+Runs pure `DICT_APRILTAG_36h11` detection. Vision mode `1` publishes only the
+order-selected pickup Tag ID; mode `2` accepts any ID and selects the tag nearest
+the image center for drop alignment. It publishes:
 
 - `/fine_data`: pixel error `[x_px, y_px]`
 
@@ -97,6 +99,14 @@ Fleet states are `IDLE -> ORDER_ACCEPTED -> PICKING_UP -> DELIVERING -> DELIVERE
 The route is released in pickup, delivery, and return stages through the local
 `/route_stage_command` topic. Until pickup is released the PID deliberately does
 not publish `/target_velocity`, so accepting an order alone cannot start flight.
+Each drone has independent `car1_home` and `delivery_point_1` destination branches.
+`drone_to_car_handoff` selects `car1_home`; `drone_direct_bundle_delivery` selects
+`delivery_point_1`. A successful result is emitted at `/drop_done`, while the drone
+continues its configured return route and later reports `LANDED` in device status.
+Drone orders must use `action=call_drone` and `device_type=drone`. Handoff orders
+must resolve to `car1_home`; direct-delivery orders must resolve to
+`delivery_point_1`. Invalid orders publish `INVALID_ORDER` without consuming the
+process's one-flight eligibility.
 
 ### `my_launch`
 
@@ -108,9 +118,14 @@ Key file:
 - `my_launch/config/drone_config.yaml` (the only normal tuning entry point)
 
 The same YAML controls pillar detection, fallback transit Y,
-height filtering, route/pickup/drop tuning, PID tuning, and order color mapping.
-The launch files and C++ defaults are implementation fallbacks and should not be
-edited for per-aircraft tuning.
+height filtering, pillar XY bounds, three independent aircraft routes,
+route/pickup/drop tuning, PID tuning, and order-to-AprilTag mapping.
+The launch files should not be edited for per-aircraft tuning.
+
+Any autonomous search, pickup, or drop failure permanently stops route progression,
+commands the servo up and magnet off, and makes PID publish `[0, 0, 5, 0]` cm/s at
+its normal control rate until the process is stopped or the flight controller is
+manually overridden. No automatic failure-return waypoints are executed.
 
 ### `pid_control_pkg`
 
@@ -161,7 +176,7 @@ Current serial frame usage:
 ros2 launch pid_control_pkg position_pid_controller.launch.py
 ros2 launch uart_to_stm32 uart_to_stm32.launch.py
 ros2 launch my_launch demo1.launch.py
-ros2 run robot_action_demo dispatch_receiver
+ROS_DOMAIN_ID=10 ros2 run robot_action_demo dispatch_server
 ```
 
 To use a non-default configuration file:

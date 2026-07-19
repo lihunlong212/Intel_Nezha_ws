@@ -40,6 +40,14 @@ ROUTE_STAGE_PICKUP = 1
 ROUTE_STAGE_DELIVERY = 2
 ROUTE_STAGE_RETURN = 3
 
+PLAN_DESTINATIONS = {
+    "drone_to_car_handoff": "car1_home",
+    "drone_direct_bundle_delivery": "delivery_point_1",
+    # Compatibility with the existing local action client default.
+    "direct_drone_delivery": "delivery_point_1",
+    "": "delivery_point_1",
+}
+
 
 class FleetOrderContext:
     """Minimal order view shared with the mission execution thread."""
@@ -54,6 +62,7 @@ class FleetOrderContext:
             task_id=str(order.get("task_id") or ""),
             device_id=str(order.get("device_id") or ""),
             item=str(order.get("item") or ""),
+            destination_key=str(order.get("route_destination_key") or ""),
         )
         self._cancel_event = cancel_event
         self.accepted_at = accepted_at
@@ -89,6 +98,7 @@ class DispatchReceiver(Node):
         self._peer_condition = threading.Condition(self._state_lock)
         self._peer_status: dict[str, dict[str, object]] = {}
         self._mission_consumed = False
+        self._result_task_ids: set[str] = set()
         self._active_task_id = ""
         self._current_state = "IDLE"
         self._predecessor_id: str | None = None
@@ -175,6 +185,8 @@ class DispatchReceiver(Node):
         if not task_id:
             self.get_logger().warning("ignoring fleet order without task_id")
             return
+        selected_task = self._select_task(str(order.get("item") or ""))
+        destination_key, order_error = self._resolve_order_destination(order)
 
         with self._state_lock:
             if self._mission_consumed:
@@ -185,6 +197,22 @@ class DispatchReceiver(Node):
                     f"{self._device_id} already consumed its one mission; restart dispatch_server",
                 )
                 return
+            if order_error:
+                self.get_logger().warning(f"rejecting invalid drone order: {order_error}")
+                self._publish_result(task_id, False, "INVALID_ORDER", order_error)
+                return
+            if selected_task is None:
+                self.get_logger().warning(
+                    f"rejecting unknown item without consuming mission: {order.get('item')!r}"
+                )
+                self._publish_result(
+                    task_id,
+                    False,
+                    "UNKNOWN_ITEM",
+                    f"unsupported item={order.get('item') or ''}",
+                )
+                return
+            order["route_destination_key"] = destination_key
             self._mission_consumed = True
             self._active_task_id = task_id
             self._current_state = "ORDER_ACCEPTED"
@@ -193,7 +221,8 @@ class DispatchReceiver(Node):
 
         accepted_at = time.monotonic()
         self.get_logger().info(
-            f"accepted one-shot order task_id={task_id} item={order.get('item') or ''}"
+            f"accepted one-shot order task_id={task_id} item={order.get('item') or ''} "
+            f"plan={order.get('plan') or ''} destination={destination_key}"
         )
         self._publish_feedback("ORDER_ACCEPTED")
         self._publish_device_status()
@@ -243,6 +272,7 @@ class DispatchReceiver(Node):
         telemetry: LocalTelemetryListener | None = None
         proc: subprocess.Popen | None = None
         pickup_failed = False
+        drop_failed = False
         drop_completed = False
         try:
             listener = LocalDomainListener(self.get_logger(), int(self._target_domain_id))
@@ -253,7 +283,7 @@ class DispatchReceiver(Node):
             with self._state_lock:
                 self._local_telemetry = telemetry
 
-            proc = self._start_launch_subprocess(task)
+            proc = self._start_launch_subprocess(task, goal.request.destination_key)
             with self._state_lock:
                 self._active_process = proc
             self.get_logger().info(f"launch subprocess pid={proc.pid}: {task.display_command}")
@@ -288,6 +318,7 @@ class DispatchReceiver(Node):
 
             delivery_released = False
             pickup_failure_handled = False
+            drop_failure_handled = False
             while rclpy.ok():
                 interrupted = self._check_interrupted(goal, proc)
                 if interrupted is not None:
@@ -297,15 +328,28 @@ class DispatchReceiver(Node):
                     pickup_failure_handled = True
                     pickup_failed = True
                     self._transition_state("FAILED")
-                    listener.publish_route_stage(ROUTE_STAGE_RETURN)
                     self.get_logger().error(
-                        "pickup failed; released the built-in safe return route"
+                        "search/pickup failed; autonomous route stopped in permanent velocity hold"
+                    )
+                    self._publish_result(
+                        task_id,
+                        False,
+                        "PICKUP_FAILED",
+                        "search/pickup failed; holding [0,0,5,0] for manual takeover",
                     )
 
-                if listener.drop_failed.is_set():
+                if listener.drop_failed.is_set() and not drop_failure_handled:
+                    drop_failure_handled = True
+                    drop_failed = True
                     self._transition_state("FAILED")
-                    return self._make_result(
-                        task_id, False, "DROP_FAILED", "drop failed"
+                    self.get_logger().error(
+                        "drop failed; autonomous route stopped in permanent velocity hold"
+                    )
+                    self._publish_result(
+                        task_id,
+                        False,
+                        "DROP_FAILED",
+                        "drop failed; holding [0,0,5,0] for manual takeover",
                     )
 
                 if (
@@ -319,10 +363,16 @@ class DispatchReceiver(Node):
                         listener, ROUTE_STAGE_DELIVERY, "DELIVERING"
                     )
 
-                if listener.drop_done.is_set() and not drop_completed:
+                if listener.drop_done.is_set() and not drop_completed and not drop_failed:
                     drop_completed = True
                     self._release_route_stage(
                         listener, ROUTE_STAGE_RETURN, "DELIVERED"
+                    )
+                    self._publish_result(
+                        task_id,
+                        True,
+                        "DELIVERED",
+                        f"cargo delivered to {goal.request.destination_key}; returning home",
                     )
 
                 if listener.mission_complete.is_set():
@@ -333,7 +383,14 @@ class DispatchReceiver(Node):
                             task_id,
                             False,
                             "PICKUP_FAILED",
-                            "pickup failed; safe return and landing completed",
+                            "search/pickup failed; manual recovery session ended",
+                        )
+                    if drop_failed:
+                        return self._make_result(
+                            task_id,
+                            False,
+                            "DROP_FAILED",
+                            "drop failed; manual recovery session ended",
                         )
                     if not drop_completed:
                         self._transition_state("FAILED")
@@ -517,6 +574,13 @@ class DispatchReceiver(Node):
         final_state: str,
         detail: str,
     ) -> None:
+        with self._state_lock:
+            if task_id in self._result_task_ids:
+                self.get_logger().debug(
+                    f"terminal result for task_id={task_id} already published; suppressing duplicate"
+                )
+                return
+            self._result_task_ids.add(task_id)
         self._publish_order_event(
             {
                 "event": "result",
@@ -554,7 +618,7 @@ class DispatchReceiver(Node):
             tasks[str(item)] = LaunchTask(
                 package="my_launch",
                 launch_file="demo1.launch.py",
-                args=[f"target_square_color:={task_config['target_square_color']}"],
+                args=[f"apriltag_target_id:={task_config['target_apriltag_id']}"],
             )
         return config_path, device_id, discovery_sec, tasks
 
@@ -572,7 +636,7 @@ class DispatchReceiver(Node):
 
     def _select_task(self, item: str) -> LaunchTask | None:
         normalized_item = self._normalize_item(item)
-        selected = self._tasks.get(normalized_item) or self._tasks.get("*")
+        selected = self._tasks.get(normalized_item)
         if selected is not None:
             self.get_logger().info(
                 f"selected item={item} normalized={normalized_item}: {selected.display_command}"
@@ -594,16 +658,60 @@ class DispatchReceiver(Node):
     def _normalize_device_id(device_id: str) -> str:
         return device_id.strip().lower()
 
-    def _start_launch_subprocess(self, task: LaunchTask) -> subprocess.Popen:
+    @staticmethod
+    def _resolve_order_destination(
+        order: dict[str, object],
+    ) -> tuple[str, str | None]:
+        action = str(order.get("action") or "").strip().lower()
+        if action != "call_drone":
+            return "", f"action must be call_drone, got {action!r}"
+        device_type = str(order.get("device_type") or "").strip().lower()
+        if device_type != "drone":
+            return "", f"device_type must be drone, got {device_type!r}"
+
+        plan = str(order.get("plan") or "").strip().lower()
+        destination_key = PLAN_DESTINATIONS.get(plan)
+        if destination_key is None:
+            return "", f"unsupported drone plan={plan!r}"
+
+        if destination_key == "car1_home":
+            requested_location = str(
+                order.get("handoff_location") or order.get("dst_location") or ""
+            ).strip()
+        else:
+            requested_location = str(
+                order.get("delivery_location")
+                or order.get("dst_location")
+                or order.get("final_dst_location")
+                or ""
+            ).strip()
+        if not requested_location:
+            return (
+                "",
+                f"plan={plan!r} requires destination {destination_key!r}, "
+                "but no destination location was provided",
+            )
+        if requested_location != destination_key:
+            return (
+                "",
+                f"plan={plan!r} requires destination {destination_key!r}, "
+                f"got {requested_location!r}",
+            )
+        return destination_key, None
+
+    def _start_launch_subprocess(
+        self, task: LaunchTask, destination_key: str
+    ) -> subprocess.Popen:
         env = os.environ.copy()
         env["ROS_DOMAIN_ID"] = self._target_domain_id
         command = [
             *task.command,
             f"config_file:={self._config_path}",
+            f"destination_key:={destination_key}",
         ]
         self.get_logger().info(
             f"starting local mission in domain {self._target_domain_id}, "
-            f"config={self._config_path}: {' '.join(command)}"
+            f"config={self._config_path}, destination={destination_key}: {' '.join(command)}"
         )
         kwargs: dict[str, object] = {"env": env}
         if os.name != "nt":

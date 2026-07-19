@@ -13,11 +13,12 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 
 from my_launch.config_loader import (
-    VALID_TARGET_COLORS,
+    APRILTAG_36H11_MAX_ID,
+    APRILTAG_36H11_MIN_ID,
+    VALID_ROUTE_DESTINATIONS,
     DroneConfigError,
     load_drone_config,
     resolve_config_path,
-    target_color_for_item,
 )
 
 
@@ -37,19 +38,33 @@ def _launch_demo(context: LaunchContext) -> list[Any]:
     requested_config = LaunchConfiguration("config_file").perform(context)
     config_path, config = load_drone_config(requested_config)
     hardware = config["hardware"]
+    destination_key = LaunchConfiguration("destination_key").perform(context).strip()
+    if destination_key not in VALID_ROUTE_DESTINATIONS:
+        raise DroneConfigError(
+            f"destination_key must be one of {VALID_ROUTE_DESTINATIONS}, "
+            f"got {destination_key!r}"
+        )
 
-    color_override = LaunchConfiguration("target_square_color").perform(context).strip().lower()
-    if color_override:
-        if color_override not in VALID_TARGET_COLORS:
-            raise DroneConfigError(
-                f"target_square_color must be one of {VALID_TARGET_COLORS}, "
-                f"got {color_override!r}"
-            )
-        target_color = color_override
-    else:
-        target_color = target_color_for_item(config, "*")
+    tag_override = LaunchConfiguration("apriltag_target_id").perform(context).strip()
+    try:
+        target_tag_id = (
+            int(tag_override)
+            if tag_override
+            else int(config["vision"]["default_pickup_apriltag_id"])
+        )
+    except ValueError as exc:
+        raise DroneConfigError("apriltag_target_id must be an integer") from exc
+    if not APRILTAG_36H11_MIN_ID <= target_tag_id <= APRILTAG_36H11_MAX_ID:
+        raise DroneConfigError(
+            f"apriltag_target_id must be in [{APRILTAG_36H11_MIN_ID}, "
+            f"{APRILTAG_36H11_MAX_ID}]"
+        )
 
     config_arg = {"config_file": str(config_path)}
+    route_config_arg = {
+        "config_file": str(config_path),
+        "destination_key": destination_key,
+    }
     actions: list[Any] = [
         _include("my_carto_pkg", "fly_carto.launch.py"),
         TimerAction(
@@ -61,7 +76,18 @@ def _launch_demo(context: LaunchContext) -> list[Any]:
         actions.append(
             TimerAction(
                 period=2.0,
-                actions=[_include("pillar_detector_pkg", "pillar_detector.launch.py")],
+                actions=[
+                    _include(
+                        "pillar_detector_pkg",
+                        "pillar_detector.launch.py",
+                        {
+                            "x_min_m": str(config["pillar_detection"]["x_min_m"]),
+                            "x_max_m": str(config["pillar_detection"]["x_max_m"]),
+                            "y_min_m": str(config["pillar_detection"]["y_min_m"]),
+                            "y_max_m": str(config["pillar_detection"]["y_max_m"]),
+                        },
+                    )
+                ],
             )
         )
     actions.extend(
@@ -71,8 +97,11 @@ def _launch_demo(context: LaunchContext) -> list[Any]:
                 actions=[
                     _include(
                         "drone_camera_pkg",
-                        "black_circle_camera.launch.py",
-                        {"target_square_color": target_color},
+                        "apriltag_camera.launch.py",
+                        {
+                            "apriltag_dictionary": config["vision"]["apriltag_dictionary"],
+                            "apriltag_target_id": str(target_tag_id),
+                        },
                     )
                 ],
             ),
@@ -92,7 +121,7 @@ def _launch_demo(context: LaunchContext) -> list[Any]:
                     _include(
                         "activity_control_pkg",
                         "route_test.launch.py",
-                        config_arg,
+                        route_config_arg,
                     )
                 ],
             ),
@@ -110,9 +139,14 @@ def generate_launch_description() -> LaunchDescription:
                 description="Single drone configuration YAML.",
             ),
             DeclareLaunchArgument(
-                "target_square_color",
+                "apriltag_target_id",
                 default_value="",
-                description="Optional per-order color override: red, black, or blue.",
+                description="Optional per-order pickup AprilTag ID override.",
+            ),
+            DeclareLaunchArgument(
+                "destination_key",
+                default_value="delivery_point_1",
+                description="Delivery route branch selected from the fleet order plan.",
             ),
             OpaqueFunction(function=_launch_demo),
         ]

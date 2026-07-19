@@ -10,7 +10,7 @@ from my_launch.config_loader import (
     load_drone_config,
     pid_parameters,
     route_parameters,
-    target_color_for_item,
+    target_apriltag_id_for_item,
 )
 
 
@@ -28,7 +28,7 @@ def _write_config(tmp_path, config):
     return path
 
 
-def test_default_config_shares_height_filter():
+def test_default_config_shares_height_filter_and_flattens_route():
     _, config = load_drone_config(SOURCE_CONFIG)
     route = route_parameters(config)
     pid = pid_parameters(config)
@@ -36,25 +36,58 @@ def test_default_config_shares_height_filter():
     assert route["height_max_cm"] == pid["height_max_cm"] == 200.0
     assert route["height_filter_jump_threshold_cm"] == 35.0
     assert route["height_filter_required_frames"] == 5
+    assert pid["failure_hold_vertical_velocity_cm_s"] == 5.0
+    assert len(route["mission_x_cm"]) == 8
+    assert route["mission_use_transit_y"] == [False, False, True, True, False, False, False, False]
+    assert route["mission_type"] == [1, 4, 1, 1, 3, 1, 1, 1]
+    assert route["mission_stage"] == [1, 1, 1, 2, 2, 3, 3, 3]
+    assert not any("failure_route" in key for key in route)
 
 
 @pytest.mark.parametrize(
     ("device_id", "expected_y"),
     (("drone1", 186.0), ("drone2", -186.0), ("drone3", 186.0)),
 )
-def test_device_selects_fallback_transit_y(tmp_path, device_id, expected_y):
+def test_device_selects_route_and_fallback(tmp_path, device_id, expected_y):
     config = _base_config()
     config["drone"]["device_id"] = device_id
+    config["routes"][device_id]["mission_prefix"][0]["x_cm"] = expected_y
     _, loaded = load_drone_config(_write_config(tmp_path, config))
     assert fallback_transit_y_cm(loaded) == expected_y
+    assert route_parameters(loaded)["mission_x_cm"][0] == expected_y
 
 
-def test_task_color_mapping_and_fallback():
+def test_each_drone_has_two_independent_destination_branches():
+    config = _base_config()
+    for index, device_id in enumerate(("drone1", "drone2", "drone3"), start=1):
+        destinations = config["routes"][device_id]["destinations"]
+        assert set(destinations) >= {"car1_home", "delivery_point_1"}
+        destinations["car1_home"]["drop_target"]["x_cm"] = 100.0 + index
+        destinations["car1_home"]["return_route"][0]["x_cm"] = 200.0 + index
+        destinations["delivery_point_1"]["drop_target"]["x_cm"] = 300.0 + index
+        destinations["delivery_point_1"]["return_route"][0]["x_cm"] = 400.0 + index
+
+    for index, device_id in enumerate(("drone1", "drone2", "drone3"), start=1):
+        selected = deepcopy(config)
+        selected["drone"]["device_id"] = device_id
+        # Validation normally happens in load_drone_config; this source structure is already valid.
+        car_route = route_parameters(selected, "car1_home")
+        direct_route = route_parameters(selected, "delivery_point_1")
+        assert car_route["mission_type"].count(3) == 1
+        assert direct_route["mission_type"].count(3) == 1
+        drop_index = car_route["mission_type"].index(3)
+        assert car_route["mission_x_cm"][drop_index] == 100.0 + index
+        assert direct_route["mission_x_cm"][drop_index] == 300.0 + index
+        assert car_route["mission_x_cm"][drop_index + 1] == 200.0 + index
+        assert direct_route["mission_x_cm"][drop_index + 1] == 400.0 + index
+
+
+def test_task_apriltag_mapping_has_no_unknown_fallback():
     _, config = load_drone_config(SOURCE_CONFIG)
-    assert target_color_for_item(config, "huawei") == "red"
-    assert target_color_for_item(config, "apple") == "black"
-    assert target_color_for_item(config, "xiaomi") == "blue"
-    assert target_color_for_item(config, "unknown") == "red"
+    assert target_apriltag_id_for_item(config, "huawei") == 1
+    assert target_apriltag_id_for_item(config, "apple") == 2
+    assert target_apriltag_id_for_item(config, "xiaomi") == 3
+    assert target_apriltag_id_for_item(config, "unknown") is None
 
 
 @pytest.mark.parametrize(
@@ -67,6 +100,20 @@ def test_task_color_mapping_and_fallback():
         lambda c: c["height_filter"].update(required_frames=0),
         lambda c: c["route"].pop("pickup_grab_altitude_cm"),
         lambda c: c["pid"].pop("kp_z"),
+        lambda c: c["pid"].pop("failure_hold_vertical_velocity_cm_s"),
+        lambda c: c["pid"].update(failure_hold_vertical_velocity_cm_s=0.0),
+        lambda c: c["vision"].update(apriltag_dictionary="DICT_4X4_50"),
+        lambda c: c["tasks"]["huawei"].update(target_apriltag_id=999),
+        lambda c: c["pillar_detection"].update(x_min_m=2.0, x_max_m=1.0),
+        lambda c: c["routes"]["drone1"]["mission_prefix"][0].update(y_cm="bad_placeholder"),
+        lambda c: c["routes"]["drone1"]["mission_prefix"][0].update(stage="delivery"),
+        lambda c: c["routes"]["drone1"]["destinations"].pop("car1_home"),
+        lambda c: c["routes"]["drone3"]["destinations"]["car1_home"].pop(
+            "drop_target"
+        ),
+        lambda c: c["routes"]["drone2"]["destinations"]["delivery_point_1"].update(
+            return_route=[]
+        ),
     ),
 )
 def test_invalid_config_fails_fast(tmp_path, mutate):

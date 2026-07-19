@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -11,14 +10,13 @@
 #include <string>
 #include <vector>
 
+#include <opencv2/aruco.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
-#include <opencv2/aruco.hpp>
 #include <opencv2/videoio.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
-#include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int8.hpp>
 
 class DroneCameraNode : public rclcpp::Node
@@ -34,29 +32,19 @@ public:
     window_name_(declare_parameter<std::string>("window_name", "drone_camera_preview")),
     fine_data_topic_(declare_parameter<std::string>("fine_data_topic", "/fine_data")),
     vision_mode_topic_(declare_parameter<std::string>("vision_mode_topic", "/vision_target_mode")),
-    square_color_topic_(declare_parameter<std::string>("square_color_topic", "/vision_square_color")),
-    target_square_color_(normalizeSquareColor(
-      declare_parameter<std::string>("target_square_color", "red"))),
-    red_hue_low_min_(declare_parameter<int>("red_hue_low_min", 0)),
-    red_hue_low_max_(declare_parameter<int>("red_hue_low_max", 10)),
-    red_hue_high_min_(declare_parameter<int>("red_hue_high_min", 170)),
-    red_hue_high_max_(declare_parameter<int>("red_hue_high_max", 179)),
-    red_saturation_min_(declare_parameter<int>("red_saturation_min", 60)),
-    red_value_min_(declare_parameter<int>("red_value_min", 50)),
-    blue_hue_min_(declare_parameter<int>("blue_hue_min", 58)),
-    blue_hue_max_(declare_parameter<int>("blue_hue_max", 111)),
-    blue_saturation_min_(declare_parameter<int>("blue_saturation_min", 49)),
-    blue_value_min_(declare_parameter<int>("blue_value_min", 75)),
-    black_value_max_(declare_parameter<int>("black_value_max", 80)),
-    min_square_area_(declare_parameter<double>(
-      "min_square_area", declare_parameter<double>("min_circle_area", 340.0))),
-    min_square_fill_ratio_(declare_parameter<double>("min_square_fill_ratio", 0.22)),
-    apriltag_dictionary_name_(declare_parameter<std::string>("apriltag_dictionary", "DICT_APRILTAG_36h11")),
-    apriltag_target_id_(declare_parameter<int>("apriltag_target_id", -1)),
-    vision_target_mode_(kVisionModeColorSquare)
+    apriltag_dictionary_name_(declare_parameter<std::string>(
+      "apriltag_dictionary", "DICT_APRILTAG_36h11")),
+    apriltag_target_id_(declare_parameter<int>("apriltag_target_id", 1)),
+    vision_target_mode_(kVisionModeIdle)
   {
-    apriltag_dictionary_ = cv::aruco::getPredefinedDictionary(
-      dictionaryFromName(apriltag_dictionary_name_));
+    if (apriltag_dictionary_name_ != "DICT_APRILTAG_36h11") {
+      throw std::invalid_argument(
+              "Only DICT_APRILTAG_36h11 is supported, got " + apriltag_dictionary_name_);
+    }
+    if (apriltag_target_id_ < 0 || apriltag_target_id_ > 586) {
+      throw std::invalid_argument("apriltag_target_id must be in [0, 586]");
+    }
+    apriltag_dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11);
     apriltag_parameters_ = cv::aruco::DetectorParameters::create();
 
     fine_data_pub_ =
@@ -65,15 +53,10 @@ public:
     vision_mode_sub_ = create_subscription<std_msgs::msg::UInt8>(
       vision_mode_topic_, mode_qos,
       std::bind(&DroneCameraNode::visionModeCallback, this, std::placeholders::_1));
-    auto color_qos = rclcpp::QoS(10).reliable();
-    square_color_sub_ = create_subscription<std_msgs::msg::String>(
-      square_color_topic_, color_qos,
-      std::bind(&DroneCameraNode::squareColorCallback, this, std::placeholders::_1));
 
     if (!camera_.open(camera_device_)) {
       throw std::runtime_error("Failed to open camera device " + camera_device_);
     }
-
     if (frame_width_ > 0) {
       camera_.set(cv::CAP_PROP_FRAME_WIDTH, frame_width_);
     }
@@ -91,28 +74,11 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Camera node started. camera_device=%s show_preview=%s fine_data_topic=%s vision_mode_topic=%s square_color_topic=%s target_square_color=%s red_hsv_low=[%d,%d] red_hsv_high=[%d,%d] red_s_min=%d red_v_min=%d blue_hsv=[%d,%d] blue_s_min=%d blue_v_min=%d black_v_max=%d min_square_area=%.1f min_square_fill_ratio=%.2f apriltag_dictionary=%s apriltag_target_id=%d",
-      camera_device_.c_str(),
-      show_preview_ ? "true" : "false",
-      fine_data_topic_.c_str(),
-      vision_mode_topic_.c_str(),
-      square_color_topic_.c_str(),
-      target_square_color_.c_str(),
-      red_hue_low_min_,
-      red_hue_low_max_,
-      red_hue_high_min_,
-      red_hue_high_max_,
-      red_saturation_min_,
-      red_value_min_,
-      blue_hue_min_,
-      blue_hue_max_,
-      blue_saturation_min_,
-      blue_value_min_,
-      black_value_max_,
-      min_square_area_,
-      min_square_fill_ratio_,
-      apriltag_dictionary_name_.c_str(),
-      apriltag_target_id_);
+      "AprilTag camera started: device=%s preview=%s dictionary=%s pickup_target_id=%d "
+      "mode_topic=%s fine_data_topic=%s (mode 1=strict target, mode 2=nearest any id)",
+      camera_device_.c_str(), show_preview_ ? "true" : "false",
+      apriltag_dictionary_name_.c_str(), apriltag_target_id_,
+      vision_mode_topic_.c_str(), fine_data_topic_.c_str());
   }
 
   ~DroneCameraNode() override
@@ -127,252 +93,38 @@ public:
   }
 
 private:
-  struct SquareCandidate
-  {
-    int contour_index{-1};
-    cv::Point2f center{};
-    std::vector<cv::Point> approx{};
-    double area{0.0};
-    double score{0.0};
-  };
-
-  static cv::aruco::PREDEFINED_DICTIONARY_NAME dictionaryFromName(const std::string & name)
-  {
-    if (name == "DICT_APRILTAG_16h5") {
-      return cv::aruco::DICT_APRILTAG_16h5;
-    }
-    if (name == "DICT_APRILTAG_25h9") {
-      return cv::aruco::DICT_APRILTAG_25h9;
-    }
-    if (name == "DICT_APRILTAG_36h10") {
-      return cv::aruco::DICT_APRILTAG_36h10;
-    }
-    return cv::aruco::DICT_APRILTAG_36h11;
-  }
-
-  static std::string normalizeSquareColor(const std::string & color)
-  {
-    std::string normalized = color;
-    std::transform(
-      normalized.begin(), normalized.end(), normalized.begin(),
-      [](unsigned char value) {
-        return static_cast<char>(std::tolower(value));
-      });
-
-    if (normalized == "black" || normalized == "apple" || normalized == "iphone") {
-      return "black";
-    }
-    if (normalized == "blue" || normalized == "xiaomi" || normalized == "mi") {
-      return "blue";
-    }
-    return "red";
-  }
-
   void visionModeCallback(const std_msgs::msg::UInt8::SharedPtr msg)
   {
-    const uint8_t mode = msg->data;
-    if (mode > kVisionModeAprilTag) {
+    if (msg->data > kVisionModeDropAnyAprilTag) {
       RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "Ignoring unsupported vision target mode: %u", static_cast<unsigned int>(mode));
+        get_logger(), *get_clock(), 2000, "Ignoring unsupported vision mode: %u",
+        static_cast<unsigned int>(msg->data));
       return;
     }
-    if (vision_target_mode_ == mode) {
-      return;
+    if (vision_target_mode_ != msg->data) {
+      vision_target_mode_ = msg->data;
+      RCLCPP_INFO(
+        get_logger(), "Vision mode changed to %u",
+        static_cast<unsigned int>(vision_target_mode_));
     }
-    vision_target_mode_ = mode;
-    RCLCPP_INFO(
-      get_logger(), "Vision target mode changed to %u",
-      static_cast<unsigned int>(vision_target_mode_));
-  }
-
-  void squareColorCallback(const std_msgs::msg::String::SharedPtr msg)
-  {
-    const std::string normalized = normalizeSquareColor(msg->data);
-    if (target_square_color_ == normalized) {
-      return;
-    }
-    target_square_color_ = normalized;
-    RCLCPP_INFO(get_logger(), "Square target color changed to %s", target_square_color_.c_str());
   }
 
   void publishFineDataFromCenter(const cv::Mat & frame, const cv::Point2f & center)
   {
     const float image_center_x = static_cast<float>(frame.cols) / 2.0F;
     const float image_center_y = static_cast<float>(frame.rows) / 2.0F;
-    const int x_offset = static_cast<int>(std::lround(image_center_y - center.y));
-    const int y_offset = static_cast<int>(std::lround(image_center_x - center.x));
-
-    std_msgs::msg::Int32MultiArray fine_data_msg;
-    fine_data_msg.data = {x_offset, y_offset};
-    fine_data_pub_->publish(fine_data_msg);
+    std_msgs::msg::Int32MultiArray msg;
+    msg.data = {
+      static_cast<int>(std::lround(image_center_y - center.y)),
+      static_cast<int>(std::lround(image_center_x - center.x))};
+    fine_data_pub_->publish(msg);
   }
 
-  static double cornerCosine(
-    const cv::Point & previous, const cv::Point & corner, const cv::Point & next)
-  {
-    const double ux = static_cast<double>(previous.x - corner.x);
-    const double uy = static_cast<double>(previous.y - corner.y);
-    const double vx = static_cast<double>(next.x - corner.x);
-    const double vy = static_cast<double>(next.y - corner.y);
-    const double denominator = std::hypot(ux, uy) * std::hypot(vx, vy);
-    if (denominator <= std::numeric_limits<double>::epsilon()) {
-      return 1.0;
-    }
-    return std::abs((ux * vx + uy * vy) / denominator);
-  }
-
-  void detectSelectedSquareAndPublish(cv::Mat & frame)
-  {
-    cv::Mat hsv;
-    cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
-
-    cv::GaussianBlur(hsv, hsv, cv::Size(5, 5), 0.0);
-    cv::Mat mask;
-    if (target_square_color_ == "black") {
-      const int value_max = std::max(0, std::min(black_value_max_, 255));
-      cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(179, 255, value_max), mask);
-    } else if (target_square_color_ == "blue") {
-      const int hue_min = std::max(0, std::min(blue_hue_min_, 179));
-      const int hue_max = std::max(0, std::min(blue_hue_max_, 179));
-      const int saturation_min = std::max(0, std::min(blue_saturation_min_, 255));
-      const int value_min = std::max(0, std::min(blue_value_min_, 255));
-      cv::inRange(
-        hsv,
-        cv::Scalar(hue_min, saturation_min, value_min),
-        cv::Scalar(hue_max, 255, 255),
-        mask);
-    } else {
-      cv::Mat mask_low;
-      cv::Mat mask_high;
-      const int hue_low_min = std::max(0, std::min(red_hue_low_min_, 179));
-      const int hue_low_max = std::max(0, std::min(red_hue_low_max_, 179));
-      const int hue_high_min = std::max(0, std::min(red_hue_high_min_, 179));
-      const int hue_high_max = std::max(0, std::min(red_hue_high_max_, 179));
-      const int saturation_min = std::max(0, std::min(red_saturation_min_, 255));
-      const int value_min = std::max(0, std::min(red_value_min_, 255));
-      cv::inRange(
-        hsv,
-        cv::Scalar(hue_low_min, saturation_min, value_min),
-        cv::Scalar(hue_low_max, 255, 255),
-        mask_low);
-      cv::inRange(
-        hsv,
-        cv::Scalar(hue_high_min, saturation_min, value_min),
-        cv::Scalar(hue_high_max, 255, 255),
-        mask_high);
-      cv::bitwise_or(mask_low, mask_high, mask);
-    }
-
-    const cv::Mat close_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
-    const cv::Mat open_kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, close_kernel);
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, open_kernel);
-
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
-
-    SquareCandidate best;
-    const double min_area = std::max(20.0, min_square_area_);
-    const double max_aspect_ratio = std::max(1.0, kMaxSquareAspectRatio);
-    const double min_fill_ratio = std::max(0.05, std::min(min_square_fill_ratio_, 1.0));
-    for (std::size_t i = 0; i < contours.size(); ++i) {
-      const double area = std::abs(cv::contourArea(contours[i]));
-      if (area < min_area) {
-        continue;
-      }
-
-      const cv::Rect bounds = cv::boundingRect(contours[i]);
-      if (bounds.width < 8 || bounds.height < 8) {
-        continue;
-      }
-
-      const double aspect_ratio =
-        static_cast<double>(std::max(bounds.width, bounds.height)) /
-        static_cast<double>(std::max(1, std::min(bounds.width, bounds.height)));
-      if (aspect_ratio > max_aspect_ratio) {
-        continue;
-      }
-
-      const double perimeter = cv::arcLength(contours[i], true);
-      if (perimeter <= 0.0) {
-        continue;
-      }
-
-      std::vector<cv::Point> approx;
-      cv::approxPolyDP(contours[i], approx, 0.02 * perimeter, true);
-      if (approx.size() != 4 || !cv::isContourConvex(approx)) {
-        continue;
-      }
-
-      double max_corner_cosine = 0.0;
-      for (std::size_t corner_index = 0; corner_index < approx.size(); ++corner_index) {
-        const cv::Point & previous = approx[(corner_index + approx.size() - 1) % approx.size()];
-        const cv::Point & corner = approx[corner_index];
-        const cv::Point & next = approx[(corner_index + 1) % approx.size()];
-        max_corner_cosine = std::max(max_corner_cosine, cornerCosine(previous, corner, next));
-      }
-      if (max_corner_cosine > kMaxSquareCornerCosine) {
-        continue;
-      }
-
-      const double rect_area = static_cast<double>(bounds.width) * static_cast<double>(bounds.height);
-      const double fill_ratio = area / std::max(1.0, rect_area);
-      if (fill_ratio < min_fill_ratio) {
-        continue;
-      }
-
-      const cv::Moments moments = cv::moments(contours[i]);
-      if (std::abs(moments.m00) <= std::numeric_limits<double>::epsilon()) {
-        continue;
-      }
-
-      const double aspect_score = 1.0 / aspect_ratio;
-      const double fill_score = std::min(1.0, fill_ratio);
-      const double corner_score = 1.0 - std::min(1.0, max_corner_cosine / kMaxSquareCornerCosine);
-      const double shape_score =
-        0.40 * fill_score + 0.35 * aspect_score + 0.25 * corner_score;
-      const double score = area * shape_score;
-      if (score > best.score) {
-        best.contour_index = static_cast<int>(i);
-        best.center = cv::Point2f(
-          static_cast<float>(moments.m10 / moments.m00),
-          static_cast<float>(moments.m01 / moments.m00));
-        best.approx = approx;
-        best.area = area;
-        best.score = score;
-      }
-    }
-
-    if (best.contour_index < 0) {
-      RCLCPP_DEBUG_THROTTLE(
-        get_logger(), *get_clock(), 1000,
-        "No %s square found. contours=%zu",
-        target_square_color_.c_str(), contours.size());
-      return;
-    }
-
-    publishFineDataFromCenter(frame, best.center);
-
-    cv::drawContours(frame, contours, best.contour_index, cv::Scalar(0, 255, 0), 2);
-    std::vector<std::vector<cv::Point>> approx_contours{best.approx};
-    cv::drawContours(frame, approx_contours, 0, cv::Scalar(255, 0, 0), 2);
-    cv::circle(
-      frame,
-      cv::Point(
-        static_cast<int>(std::lround(best.center.x)),
-        static_cast<int>(std::lround(best.center.y))),
-      4,
-      cv::Scalar(0, 0, 255),
-      cv::FILLED);
-  }
-
-  void detectAprilTagAndPublish(cv::Mat & frame)
+  void detectAprilTagAndPublish(cv::Mat & frame, bool strict_pickup_id)
   {
     std::vector<int> ids;
     std::vector<std::vector<cv::Point2f>> corners;
     cv::aruco::detectMarkers(frame, apriltag_dictionary_, corners, ids, apriltag_parameters_);
-
     if (ids.empty()) {
       RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 1000, "No AprilTag found.");
       return;
@@ -384,27 +136,24 @@ private:
     int best_index = -1;
     double best_distance = std::numeric_limits<double>::max();
     cv::Point2f best_center;
-
-    for (std::size_t i = 0; i < ids.size(); ++i) {
-      if (apriltag_target_id_ >= 0 && ids[i] != apriltag_target_id_) {
+    for (std::size_t index = 0; index < ids.size(); ++index) {
+      if (strict_pickup_id && ids[index] != apriltag_target_id_) {
         continue;
       }
-      if (corners[i].size() < 4) {
+      if (corners[index].size() != 4) {
         continue;
       }
-
       cv::Point2f center(0.0F, 0.0F);
-      for (const auto & corner : corners[i]) {
+      for (const auto & corner : corners[index]) {
         center += corner;
       }
-      center *= 1.0F / static_cast<float>(corners[i].size());
-
-      const double dx = static_cast<double>(center.x - image_center.x);
-      const double dy = static_cast<double>(center.y - image_center.y);
-      const double distance = std::hypot(dx, dy);
+      center *= 0.25F;
+      const double distance = std::hypot(
+        static_cast<double>(center.x - image_center.x),
+        static_cast<double>(center.y - image_center.y));
       if (distance < best_distance) {
         best_distance = distance;
-        best_index = static_cast<int>(i);
+        best_index = static_cast<int>(index);
         best_center = center;
       }
     }
@@ -412,7 +161,7 @@ private:
     if (best_index < 0) {
       RCLCPP_DEBUG_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "AprilTags found, but none matched target id %d.", apriltag_target_id_);
+        "AprilTags detected, but pickup target id %d is absent.", apriltag_target_id_);
       return;
     }
 
@@ -423,9 +172,11 @@ private:
       cv::Point(
         static_cast<int>(std::lround(best_center.x)),
         static_cast<int>(std::lround(best_center.y))),
-      4,
-      cv::Scalar(0, 0, 255),
-      cv::FILLED);
+      4, cv::Scalar(0, 0, 255), cv::FILLED);
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 1000, "Selected AprilTag id=%d distance=%.1fpx mode=%u",
+      ids[static_cast<std::size_t>(best_index)], best_distance,
+      static_cast<unsigned int>(vision_target_mode_));
   }
 
   void frameTimerCallback()
@@ -433,23 +184,16 @@ private:
     cv::Mat frame;
     {
       std::lock_guard<std::mutex> lock(frame_mutex_);
-      if (!camera_.isOpened()) {
-        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 3000, "Camera is not opened.");
-        return;
-      }
-
-      if (!camera_.read(frame) || frame.empty()) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000, "Failed to read frame from camera.");
+      if (!camera_.isOpened() || !camera_.read(frame) || frame.empty()) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 3000, "Failed to read camera frame.");
         return;
       }
     }
-
-    if (vision_target_mode_ == kVisionModeColorSquare) {
-      detectSelectedSquareAndPublish(frame);
-    } else if (vision_target_mode_ == kVisionModeAprilTag) {
-      detectAprilTagAndPublish(frame);
+    if (vision_target_mode_ == kVisionModePickupAprilTag) {
+      detectAprilTagAndPublish(frame, true);
+    } else if (vision_target_mode_ == kVisionModeDropAnyAprilTag) {
+      detectAprilTagAndPublish(frame, false);
     }
-
     if (show_preview_) {
       cv::imshow(window_name_, frame);
       cv::waitKey(1);
@@ -464,39 +208,20 @@ private:
   std::string window_name_;
   std::string fine_data_topic_;
   std::string vision_mode_topic_;
-  std::string square_color_topic_;
-  std::string target_square_color_;
-  int red_hue_low_min_;
-  int red_hue_low_max_;
-  int red_hue_high_min_;
-  int red_hue_high_max_;
-  int red_saturation_min_;
-  int red_value_min_;
-  int blue_hue_min_;
-  int blue_hue_max_;
-  int blue_saturation_min_;
-  int blue_value_min_;
-  int black_value_max_;
-  double min_square_area_;
-  double min_square_fill_ratio_;
   std::string apriltag_dictionary_name_;
   int apriltag_target_id_;
   uint8_t vision_target_mode_;
-
   std::mutex frame_mutex_;
   cv::VideoCapture camera_;
   rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_pub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr vision_mode_sub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr square_color_sub_;
   rclcpp::TimerBase::SharedPtr frame_timer_;
   cv::Ptr<cv::aruco::Dictionary> apriltag_dictionary_;
   cv::Ptr<cv::aruco::DetectorParameters> apriltag_parameters_;
 
   static constexpr uint8_t kVisionModeIdle = 0;
-  static constexpr uint8_t kVisionModeColorSquare = 1;
-  static constexpr uint8_t kVisionModeAprilTag = 2;
-  static constexpr double kMaxSquareAspectRatio = 1.25;
-  static constexpr double kMaxSquareCornerCosine = 0.35;
+  static constexpr uint8_t kVisionModePickupAprilTag = 1;
+  static constexpr uint8_t kVisionModeDropAnyAprilTag = 2;
 };
 
 int main(int argc, char * argv[])

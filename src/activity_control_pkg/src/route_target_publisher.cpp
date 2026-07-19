@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -23,8 +24,8 @@ namespace
 {
 constexpr double kDefaultTimerPeriodSec = 0.05;
 constexpr uint8_t kVisionModeIdle = 0;
-constexpr uint8_t kVisionModeColorSquare = 1;
-constexpr uint8_t kVisionModeAprilTag = 2;
+constexpr uint8_t kVisionModePickupAprilTag = 1;
+constexpr uint8_t kVisionModeDropAnyAprilTag = 2;
 constexpr uint8_t kServoUp = 0x00;
 constexpr uint8_t kServoPickupDown = 0x01;
 constexpr uint8_t kServoDropDown = 0x02;
@@ -36,10 +37,6 @@ constexpr uint8_t kRouteStageHold = 0;
 constexpr uint8_t kRouteStagePickup = 1;
 constexpr uint8_t kRouteStageDelivery = 2;
 constexpr uint8_t kRouteStageReturn = 3;
-constexpr double kPostPickupAltitudeCm = 120.0;
-constexpr double kLandingAltitudeCm = 15.0;
-constexpr double kPickupFailureReturnAltitudeCm = 110.0;
-constexpr double kPickupFailureLandingAltitudeCm = 10.0;
 constexpr double kSearchApproachPixelThresholdMultiplier = 2.0;
 
 bool isPickupPhase(TaskPhase phase)
@@ -124,7 +121,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   fine_error_x_px_(0),
   fine_error_y_px_(0),
   mission_complete_sent_(false),
-  drop_failure_return_active_(false),
+  failure_hold_active_(false),
   aligned_frame_count_(0),
   search_approach_altitude_cm_(0.0),
   phase_(TaskPhase::Idle),
@@ -169,6 +166,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
   pickup_observe_sec_ = declare_parameter("pickup_observe_sec", pickup_check_observe_sec_);
   pickup_max_attempts_ = declare_parameter("pickup_max_attempts", 3);
   circle_lost_window_sec_ = declare_parameter("circle_lost_window_sec", 1.0);
+  post_pickup_climb_altitude_cm_ =
+    declare_parameter("post_pickup_climb_altitude_cm", 120.0);
   // 投放参数（独立）
   drop_altitude_cm_ = declare_parameter("drop_altitude_cm", 40.0);
   drop_align_altitude_cm_ = declare_parameter("drop_align_altitude_cm", 50.0);
@@ -186,6 +185,8 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
     create_publisher<std_msgs::msg::Bool>("/visual_takeover_active", durable_qos);
   xy_velocity_hold_active_pub_ =
     create_publisher<std_msgs::msg::Bool>("/xy_velocity_hold_active", durable_qos);
+  failure_hold_active_pub_ =
+    create_publisher<std_msgs::msg::Bool>("/failure_hold_active", durable_qos);
   vision_target_mode_pub_ =
     create_publisher<std_msgs::msg::UInt8>(vision_mode_topic_, durable_qos);
   servo_control_pub_ =
@@ -237,6 +238,7 @@ RouteTargetPublisherNode::RouteTargetPublisherNode(const rclcpp::NodeOptions & o
 
   publishVisualTakeoverState(false);
   publishXyVelocityHoldState(false);
+  publishFailureHoldState(false);
   publishVisionTargetMode(kVisionModeIdle);
 
   RCLCPP_INFO(
@@ -289,7 +291,6 @@ void RouteTargetPublisherNode::addTarget(const Target & target)
   targets_.push_back(target);
   if (was_empty || was_completed) {
     mission_complete_sent_ = false;
-    drop_failure_return_active_ = false;
     current_idx_ = was_completed ? targets_.size() - 1 : 0;
     publishCurrent();
   }
@@ -309,6 +310,9 @@ std::size_t RouteTargetPublisherNode::size() const
 
 void RouteTargetPublisherNode::publishCurrent()
 {
+  if (failure_hold_active_) {
+    return;
+  }
   if (current_idx_ != std::numeric_limits<std::size_t>::max() && current_idx_ < targets_.size()) {
     if (!isCurrentTargetStageAllowed()) {
       publishRouteHoldState();
@@ -323,6 +327,10 @@ void RouteTargetPublisherNode::routeStageCommandCallback(
   const std_msgs::msg::UInt8::SharedPtr msg)
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (failure_hold_active_) {
+    RCLCPP_WARN(get_logger(), "Ignoring route stage command after autonomous mission failure.");
+    return;
+  }
   const uint8_t requested_stage = msg->data;
   if (requested_stage > kRouteStageReturn) {
     RCLCPP_WARN(
@@ -388,7 +396,7 @@ Target RouteTargetPublisherNode::getPublishedTarget(const Target & target) const
       published_target.z_cm = search_approach_altitude_cm_;
       break;
     case TaskPhase::PickupAligning:
-      // 第一次对准：用航�?xy；重试时：用上一次对准成功时记录�?xy（更接近实际黑色正方形片位置�?
+      // 第一次使用航点 XY；重试使用上次 AprilTag 对准成功时记录的实际 XY。
       if (has_aligned_position_) {
         published_target.x_cm = aligned_x_cm_;
         published_target.y_cm = aligned_y_cm_;
@@ -449,7 +457,7 @@ void RouteTargetPublisherNode::heightCallback(const std_msgs::msg::Int16::Shared
     has_height_filter_candidate_ = false;
     height_filter_candidate_frames_ = 0;
     RCLCPP_ERROR_THROTTLE(
-      get_logger(), *get_clock(), 1000,
+      get_logger(), *get_clock(), 5000,
       "Rejected out-of-range /height: raw=%.1fcm valid_range=[%.1f, %.1f]cm",
       raw_height_cm, height_min_cm_, height_max_cm_);
     return;
@@ -503,8 +511,8 @@ void RouteTargetPublisherNode::heightCallback(const std_msgs::msg::Int16::Shared
     return;
   }
 
-  RCLCPP_WARN_THROTTLE(
-    get_logger(), *get_clock(), 1000,
+  RCLCPP_DEBUG_THROTTLE(
+    get_logger(), *get_clock(), 5000,
     "Filtered /height jump raw=%.1fcm accepted=%.1fcm delta=%.1fcm candidate_frames=%d/%d",
     raw_height_cm, current_height_cm_, accepted_delta_cm,
     height_filter_candidate_frames_, required_frames);
@@ -642,13 +650,6 @@ void RouteTargetPublisherNode::advanceToNextTarget()
     publishCurrent();
   } else {
     current_idx_ = targets_.size();
-    if (drop_failure_return_active_ && drop_failed_pub_) {
-      std_msgs::msg::Empty drop_failed_msg;
-      drop_failed_pub_->publish(drop_failed_msg);
-      drop_failure_return_active_ = false;
-      mission_complete_sent_ = true;
-      RCLCPP_WARN(get_logger(), "Drop failed return-and-land completed. Published /drop_failed.");
-    }
     if (!mission_complete_sent_ && mission_complete_pub_) {
       std_msgs::msg::Empty mission_complete_msg;
       mission_complete_pub_->publish(mission_complete_msg);
@@ -661,42 +662,29 @@ void RouteTargetPublisherNode::advanceToNextTarget()
   }
 }
 
-void RouteTargetPublisherNode::startDropFailureReturn(
+void RouteTargetPublisherNode::enterFailureHold(
   const rclcpp::Time & now_time,
-  double landing_yaw_deg)
+  const char * reason,
+  bool drop_failure)
 {
-  publishServoControl(kServoUp);
-  has_aligned_position_ = false;
-  drop_failure_return_active_ = true;
+  if (failure_hold_active_) {
+    return;
+  }
+
+  failure_hold_active_ = true;
   mission_complete_sent_ = false;
 
-  const double return_altitude_cm = std::max(
-    drop_align_altitude_cm_,
-    targets_.empty() ? drop_align_altitude_cm_ : targets_.front().z_cm);
+  // Any autonomous failure leaves the mechanism in the same manual-recovery state.
+  publishServoControl(kServoUp);
+  publishElectromagnetControl(0x00);
 
-  targets_.resize(current_idx_ + 1);
-  targets_.push_back(
-    Target{
-      0.0, 0.0, return_altitude_cm, landing_yaw_deg,
-      kTargetTypeWaypoint, kRouteStageReturn});
-  targets_.push_back(
-    Target{
-      0.0, 0.0, 0.0, landing_yaw_deg,
-      kTargetTypeWaypoint, kRouteStageReturn});
-
-  RCLCPP_WARN(
-    get_logger(),
-    "Drop failed. Returning to home: (0.0, 0.0, %.1fcm), then landing at (0.0, 0.0, 0.0).",
-    return_altitude_cm);
-
-  if (phase_ != TaskPhase::Idle) {
-    RCLCPP_INFO(get_logger(), "Phase: %s -> Idle (drop failure return)", phaseToString(phase_));
-  }
+  has_aligned_position_ = false;
   phase_ = TaskPhase::Idle;
   phase_start_time_ = now_time;
   magnet_sent_in_phase_ = false;
   aligned_frame_count_ = 0;
   resetFineDataState();
+
   if (visual_takeover_active_) {
     visual_takeover_active_ = false;
     publishVisualTakeoverState(false);
@@ -706,86 +694,35 @@ void RouteTargetPublisherNode::startDropFailureReturn(
     publishXyVelocityHoldState(false);
   }
   publishVisionTargetMode(kVisionModeIdle);
+  publishFailureHoldState(true);
 
-  advanceToNextTarget();
-}
-
-void RouteTargetPublisherNode::startSearchFailureReturn(const rclcpp::Time & now_time)
-{
-  targets_.resize(current_idx_ + 1);
-  targets_.push_back(
-    Target{
-      0.0, 0.0, kPostPickupAltitudeCm, 0.0,
-      kTargetTypeWaypoint, kRouteStageReturn});
-  targets_.push_back(
-    Target{
-      0.0, 0.0, kLandingAltitudeCm, 0.0,
-      kTargetTypeWaypoint, kRouteStageReturn});
-
-  if (pickup_failed_pub_) {
+  if (drop_failure && drop_failed_pub_) {
+    std_msgs::msg::Empty empty_msg;
+    drop_failed_pub_->publish(empty_msg);
+  } else if (!drop_failure && pickup_failed_pub_) {
     std_msgs::msg::Empty empty_msg;
     pickup_failed_pub_->publish(empty_msg);
   }
 
-  resetFineDataState();
-  publishVisionTargetMode(kVisionModeIdle);
-  if (visual_takeover_active_) {
-    visual_takeover_active_ = false;
-    publishVisualTakeoverState(false);
-  }
-
-  phase_ = TaskPhase::Idle;
-  phase_start_time_ = now_time;
-  has_aligned_position_ = false;
-  magnet_sent_in_phase_ = false;
-
-  RCLCPP_WARN(
+  RCLCPP_ERROR(
     get_logger(),
-    "Search completed without target detection. Returning via (0.0, 0.0, %.1fcm), then landing at %.1fcm.",
-    kPostPickupAltitudeCm, kLandingAltitudeCm);
-
-  advanceToNextTarget();
+    "%s Autonomous route stopped permanently; PID failure hold is [0, 0, +5, 0] until process shutdown.",
+    reason);
 }
 
-void RouteTargetPublisherNode::startPickupFailureReturn(const rclcpp::Time & now_time)
+void RouteTargetPublisherNode::startDropFailureHold(const rclcpp::Time & now_time)
 {
-  publishElectromagnetControl(0x00);
-  publishServoControl(kServoUp);
+  enterFailureHold(now_time, "Drop failed.", true);
+}
 
-  if (pickup_failed_pub_) {
-    std_msgs::msg::Empty empty_msg;
-    pickup_failed_pub_->publish(empty_msg);
-  }
+void RouteTargetPublisherNode::startSearchFailureHold(const rclcpp::Time & now_time)
+{
+  enterFailureHold(now_time, "Search failed.", false);
+}
 
-  targets_.resize(current_idx_ + 1);
-  targets_.push_back(
-    Target{
-      0.0, 0.0, kPickupFailureReturnAltitudeCm, 0.0,
-      kTargetTypeWaypoint, kRouteStageReturn});
-  targets_.push_back(
-    Target{
-      0.0, 0.0, kPickupFailureLandingAltitudeCm, 0.0,
-      kTargetTypeWaypoint, kRouteStageReturn});
-
-  resetFineDataState();
-  publishVisionTargetMode(kVisionModeIdle);
-  if (visual_takeover_active_) {
-    visual_takeover_active_ = false;
-    publishVisualTakeoverState(false);
-  }
-
-  phase_ = TaskPhase::Idle;
-  phase_start_time_ = now_time;
-  has_aligned_position_ = false;
-  magnet_sent_in_phase_ = false;
-  mission_complete_sent_ = false;
-
-  RCLCPP_WARN(
-    get_logger(),
-    "Pickup failed after %d attempts. Returning via (0.0, 0.0, %.1fcm), then landing at %.1fcm.",
-    pickup_attempts_, kPickupFailureReturnAltitudeCm, kPickupFailureLandingAltitudeCm);
-
-  advanceToNextTarget();
+void RouteTargetPublisherNode::startPickupFailureHold(const rclcpp::Time & now_time)
+{
+  enterFailureHold(now_time, "Pickup failed.", false);
 }
 
 void RouteTargetPublisherNode::insertPostPickupClimbTarget(
@@ -797,12 +734,12 @@ void RouteTargetPublisherNode::insertPostPickupClimbTarget(
   targets_.insert(
     insert_pos,
     Target{
-      x_cm, y_cm, kPostPickupAltitudeCm, yaw_deg,
+      x_cm, y_cm, post_pickup_climb_altitude_cm_, yaw_deg,
       kTargetTypeWaypoint, kRouteStagePickup});
   RCLCPP_INFO(
     get_logger(),
     "Inserted post-pickup climb target at (%.1f, %.1f, %.1f, %.1f).",
-    x_cm, y_cm, kPostPickupAltitudeCm, yaw_deg);
+    x_cm, y_cm, post_pickup_climb_altitude_cm_, yaw_deg);
 }
 
 void RouteTargetPublisherNode::removePendingSearchTargetsAfterCurrent()
@@ -862,7 +799,7 @@ void RouteTargetPublisherNode::publishIdleVisionModeForCurrentTarget()
 
   publishVisionTargetMode(
     targets_[current_idx_].type == kTargetTypeSearch ?
-    kVisionModeColorSquare : kVisionModeIdle);
+    kVisionModePickupAprilTag : kVisionModeIdle);
 }
 
 void RouteTargetPublisherNode::publishVisualTakeoverState(bool active)
@@ -877,6 +814,13 @@ void RouteTargetPublisherNode::publishXyVelocityHoldState(bool active)
   std_msgs::msg::Bool msg;
   msg.data = active;
   xy_velocity_hold_active_pub_->publish(msg);
+}
+
+void RouteTargetPublisherNode::publishFailureHoldState(bool active)
+{
+  std_msgs::msg::Bool msg;
+  msg.data = active;
+  failure_hold_active_pub_->publish(msg);
 }
 
 void RouteTargetPublisherNode::publishVisionTargetMode(uint8_t mode)
@@ -938,9 +882,9 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
   magnet_sent_in_phase_ = false;
 
   // Visual takeover:
-  // - PickupAligning aligns over the color square at the approach height.
+  // - PickupAligning aligns over the order-selected AprilTag at the approach height.
   // - PickupDescending keeps visual XY correction while descending to grab height.
-  // - PickupObserving enables vision to decide whether the square is still visible.
+  // - PickupObserving checks whether the selected pickup AprilTag is still visible.
   // PID already holds XY velocity at zero if /fine_data becomes stale.
   const bool search_visual_phase = phase == TaskPhase::SearchApproaching;
   const bool pickup_visual_phase =
@@ -992,9 +936,9 @@ void RouteTargetPublisherNode::setPhase(TaskPhase phase, const rclcpp::Time & no
 
   uint8_t vision_mode = kVisionModeIdle;
   if (search_visual_phase || pickup_visual_phase) {
-    vision_mode = kVisionModeColorSquare;
+    vision_mode = kVisionModePickupAprilTag;
   } else if (drop_visual_phase) {
-    vision_mode = kVisionModeAprilTag;
+    vision_mode = kVisionModeDropAnyAprilTag;
   }
   publishVisionTargetMode(vision_mode);
 
@@ -1030,6 +974,10 @@ void RouteTargetPublisherNode::monitorTimerCallback()
     current_idx_, targets_.size(), static_cast<int>(phase_),
     has_height_ ? "true" : "false");
 
+  if (failure_hold_active_) {
+    return;
+  }
+
   if (current_idx_ != std::numeric_limits<std::size_t>::max() && current_idx_ >= targets_.size()) {
     std_msgs::msg::UInt8 active_msg;
     active_msg.data = 3;
@@ -1039,9 +987,6 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       publishVisualTakeoverState(false);
     }
     publishVisionTargetMode(kVisionModeIdle);
-    RCLCPP_INFO_THROTTLE(
-      get_logger(), *get_clock(), 2000,
-      "All targets completed. Keeping stop signal active.");
     return;
   }
 
@@ -1051,7 +996,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
 
   if (!isCurrentTargetStageAllowed()) {
     publishRouteHoldState();
-    RCLCPP_INFO_THROTTLE(
+    RCLCPP_DEBUG_THROTTLE(
       get_logger(), *get_clock(), 2000,
       "Route held before target %zu: target_stage=%u allowed_stage=%u.",
       current_idx_,
@@ -1090,7 +1035,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
   switch (phase_) {
     case TaskPhase::Idle: {
       if (target.type == kTargetTypeSearch) {
-        publishVisionTargetMode(kVisionModeColorSquare);
+        publishVisionTargetMode(kVisionModePickupAprilTag);
         if (hasFreshFineData(now_time)) {
           RCLCPP_INFO(
             get_logger(),
@@ -1150,7 +1095,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         if (hasPendingSearchTargetsAfterCurrent()) {
           advanceToNextTarget();
         } else {
-          startSearchFailureReturn(now_time);
+          startSearchFailureHold(now_time);
         }
       } else {
         advanceToNextTarget();
@@ -1162,16 +1107,16 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (phase_elapsed > visual_takeover_timeout_sec_) {
         RCLCPP_WARN(
           get_logger(),
-          "Search visual approach timed out for target %zu after %.1fs. Returning home.",
+          "Search visual approach timed out for target %zu after %.1fs. Entering permanent velocity hold.",
           current_idx_, phase_elapsed);
-        startSearchFailureReturn(now_time);
+        startSearchFailureHold(now_time);
         return;
       }
 
       if (!hasFreshFineData(now_time)) {
         aligned_frame_count_ = 0;
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 1000,
+        RCLCPP_DEBUG_THROTTLE(
+          get_logger(), *get_clock(), 5000,
           "Waiting for fresh /fine_data while visually approaching search target %zu.",
           current_idx_);
         return;
@@ -1211,18 +1156,16 @@ void RouteTargetPublisherNode::monitorTimerCallback()
           get_logger(),
           "Pickup alignment timed out for target %zu after %.1fs (attempt %d/%d). Giving up.",
           current_idx_, phase_elapsed, pickup_attempts_ + 1, pickup_max_attempts_);
-        publishElectromagnetControl(0x00);
-        publishServoControl(kServoUp);
         has_aligned_position_ = false;  // 超时跳过，清掉锁�?
         pickup_attempts_ = std::max(pickup_attempts_ + 1, pickup_max_attempts_);
-        startPickupFailureReturn(now_time);
+        startPickupFailureHold(now_time);
         return;
       }
 
       if (!hasFreshFineData(now_time)) {
         aligned_frame_count_ = 0;
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 1000,
+        RCLCPP_DEBUG_THROTTLE(
+          get_logger(), *get_clock(), 5000,
           "Waiting for fresh /fine_data while aligning at target %zu.", current_idx_);
         return;
       }
@@ -1247,7 +1190,7 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         ++aligned_frame_count_;
         if (aligned_frame_count_ >= visual_align_required_frames_) {
           // 对准成功：记录此刻无人机的真�?xy，作为后续下�?上升/重试的锁位坐�?
-          // （黑色正方形片实物位置可能不在航�?xy 上，所以用真实位置代替航点坐标�?
+          // 目标 AprilTag 可能不在航点 XY 上，因此锁定当前真实位置。
           aligned_x_cm_ = x_cm;
           aligned_y_cm_ = y_cm;
           has_aligned_position_ = true;
@@ -1313,10 +1256,10 @@ void RouteTargetPublisherNode::monitorTimerCallback()
         return;
       }
 
-      // Pickup succeeds when the color square disappears from /fine_data during observation.
-      const bool square_seen = pickup_observed_fine_data_;
+      // Pickup succeeds when the order-selected AprilTag disappears during observation.
+      const bool target_tag_seen = pickup_observed_fine_data_;
 
-      if (!square_seen) {
+      if (!target_tag_seen) {
         RCLCPP_INFO(
           get_logger(),
           "Pickup SUCCESS at target %zu (attempt %d/%d). Advancing.",
@@ -1346,9 +1289,9 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (pickup_attempts_ >= pickup_max_attempts_) {
         RCLCPP_WARN(
           get_logger(),
-          "Pickup FAILED after %d attempts at target %zu. Returning home.",
+          "Pickup FAILED after %d attempts at target %zu. Entering permanent velocity hold.",
           pickup_attempts_, current_idx_);
-        startPickupFailureReturn(now_time);
+        startPickupFailureHold(now_time);
       } else {
         RCLCPP_WARN(
           get_logger(),
@@ -1378,16 +1321,16 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (phase_elapsed > visual_takeover_timeout_sec_) {
         RCLCPP_WARN(
           get_logger(),
-          "Drop alignment timed out for target %zu after %.1fs. Continuing with timed drop without AprilTag lock.",
+          "Drop alignment timed out for target %zu after %.1fs. Entering permanent velocity hold.",
           current_idx_, phase_elapsed);
-        setPhase(TaskPhase::DropServoSettling, now_time);
+        startDropFailureHold(now_time);
         return;
       }
 
       if (!hasFreshFineData(now_time)) {
         aligned_frame_count_ = 0;
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 1000,
+        RCLCPP_DEBUG_THROTTLE(
+          get_logger(), *get_clock(), 5000,
           "Waiting for fresh AprilTag /fine_data while aligning drop target %zu.", current_idx_);
         return;
       }
@@ -1437,9 +1380,9 @@ void RouteTargetPublisherNode::monitorTimerCallback()
       if (phase_elapsed > visual_takeover_timeout_sec_) {
         RCLCPP_WARN(
           get_logger(),
-          "Drop descent timed out for target %zu after %.1fs. Releasing at current height.",
+          "Drop descent timed out for target %zu after %.1fs. Entering permanent velocity hold.",
           current_idx_, phase_elapsed);
-        setPhase(TaskPhase::DropActing, now_time);
+        startDropFailureHold(now_time);
         return;
       }
 
@@ -1499,11 +1442,29 @@ RouteTestNode::RouteTestNode(
   route_node_(route_node)
 {
   std::setlocale(LC_ALL, "");
+  device_id_ = declare_parameter<std::string>("device_id", "drone1");
+  destination_key_ =
+    declare_parameter<std::string>("destination_key", "delivery_point_1");
   use_pillar_detection_ = declare_parameter<bool>("use_pillar_detection", true);
   default_transit_y_cm_ = declare_parameter<double>("default_transit_y_cm", 186.0);
   pillar_detection_timeout_sec_ = std::max(
     0.1,
     declare_parameter<double>("pillar_detection_timeout_sec", 20.0));
+  mission_x_cm_ = declare_parameter("mission_x_cm", std::vector<double>{});
+  mission_y_cm_ = declare_parameter("mission_y_cm", std::vector<double>{});
+  mission_z_cm_ = declare_parameter("mission_z_cm", std::vector<double>{});
+  mission_yaw_deg_ = declare_parameter("mission_yaw_deg", std::vector<double>{});
+  mission_use_transit_y_ = declare_parameter("mission_use_transit_y", std::vector<bool>{});
+  mission_type_ = declare_parameter("mission_type", std::vector<int64_t>{});
+  mission_stage_ = declare_parameter("mission_stage", std::vector<int64_t>{});
+  const std::size_t route_size = mission_x_cm_.size();
+  if (route_size == 0 || mission_y_cm_.size() != route_size ||
+    mission_z_cm_.size() != route_size || mission_yaw_deg_.size() != route_size ||
+    mission_use_transit_y_.size() != route_size || mission_type_.size() != route_size ||
+    mission_stage_.size() != route_size)
+  {
+    throw std::invalid_argument("mission route arrays must be non-empty and equal-sized");
+  }
 
   auto pillar_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
   pillar_detection_valid_pub_ = create_publisher<std_msgs::msg::Bool>(
@@ -1520,8 +1481,10 @@ RouteTestNode::RouteTestNode(
       std::bind(&RouteTestNode::pillarDetectionTimeoutCallback, this));
     RCLCPP_INFO(
       get_logger(),
-      "Pillar detection enabled. Waiting %.1fs for /detected_pillars; fallback transit_y=%.1fcm.",
-      pillar_detection_timeout_sec_, default_transit_y_cm_);
+      "%s route selected: destination=%s (%zu targets). Pillar detection enabled; waiting %.1fs for "
+      "/detected_pillars, fallback transit_y=%.1fcm.",
+      device_id_.c_str(), destination_key_.c_str(), mission_x_cm_.size(), pillar_detection_timeout_sec_,
+      default_transit_y_cm_);
     return;
   }
 
@@ -1530,8 +1493,8 @@ RouteTestNode::RouteTestNode(
   publishPillarDetectionValid(true);
   RCLCPP_WARN(
     get_logger(),
-    "Pillar detection disabled. Route loaded immediately with default transit_y=%.1fcm.",
-    default_transit_y_cm_);
+    "%s route selected: destination=%s (%zu targets). Pillar detection disabled; using transit_y=%.1fcm.",
+    device_id_.c_str(), destination_key_.c_str(), mission_x_cm_.size(), default_transit_y_cm_);
 }
 
 void RouteTestNode::publishPillarDetectionValid(bool valid)
@@ -1609,26 +1572,18 @@ void RouteTestNode::detectedPillarsCallback(const std_msgs::msg::Float32MultiArr
 
 std::vector<Target> RouteTestNode::buildRoute(double transit_y_cm) const
 {
-  return std::vector<Target>{
-    Target{0.0, 0.0, 80.0, 0.0, kTargetTypeWaypoint, kRouteStagePickup},
-    Target{0.0, 140.0, 80.0, 0.0, kTargetTypeSearch, kRouteStagePickup},
-    Target{0.0, transit_y_cm, 120.0, 0.0, kTargetTypeWaypoint, kRouteStagePickup},
-
-
-    Target{
-      100.0, transit_y_cm, 120.0, 0.0,
-      kTargetTypeWaypoint, kRouteStageDelivery},
-    Target{
-      130.0, transit_y_cm, 120.0, 0.0,
-      kTargetTypeWaypoint, kRouteStageDelivery},
-
-    Target{164.0, 56.0, 120.0, 0.0, kTargetTypeDrop, kRouteStageDelivery},
-    
-    Target{0.0, 0.0, 120.0, 0.0, kTargetTypeWaypoint, kRouteStageReturn},
-    Target{
-      0.0, 0.0, kLandingAltitudeCm, 0.0,
-      kTargetTypeWaypoint, kRouteStageReturn},
-  };
+  std::vector<Target> route;
+  route.reserve(mission_x_cm_.size());
+  for (std::size_t index = 0; index < mission_x_cm_.size(); ++index) {
+    route.push_back(Target{
+      mission_x_cm_[index],
+      mission_use_transit_y_[index] ? transit_y_cm : mission_y_cm_[index],
+      mission_z_cm_[index],
+      mission_yaw_deg_[index],
+      static_cast<int>(mission_type_[index]),
+      static_cast<uint8_t>(mission_stage_[index])});
+  }
+  return route;
 }
 
 void RouteTestNode::loadRoute(const std::vector<Target> & route)
@@ -1641,7 +1596,7 @@ void RouteTestNode::loadRoute(const std::vector<Target> & route)
   for (std::size_t index = 0; index < route.size(); ++index) {
     const auto & target = route[index];
     route_node_->addTarget(target);
-    RCLCPP_INFO(
+    RCLCPP_DEBUG(
       get_logger(),
       "Loaded target %zu/%zu: x=%.1f y=%.1f z=%.1f yaw=%.1f type=%d",
       index + 1, route.size(),

@@ -429,7 +429,7 @@ class DispatchWorker(Node):
             tasks[str(item)] = LaunchTask(
                 package="my_launch",
                 launch_file="demo1.launch.py",
-                args=[f"target_square_color:={task_config['target_square_color']}"],
+                args=[f"apriltag_target_id:={task_config['target_apriltag_id']}"],
             )
         return config_path, target_domain_id, tasks, config
 
@@ -447,7 +447,7 @@ class DispatchWorker(Node):
 
     def _select_task(self, item: str) -> LaunchTask | None:
         normalized_item = self._normalize_item(item)
-        return self._tasks.get(normalized_item) or self._tasks.get(item) or self._tasks.get("*")
+        return self._tasks.get(normalized_item) or self._tasks.get(item)
 
     @staticmethod
     def _normalize_item(item: str) -> str:

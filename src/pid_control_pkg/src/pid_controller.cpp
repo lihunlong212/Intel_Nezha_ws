@@ -154,6 +154,7 @@ PositionPIDController::PositionPIDController()
   visual_pixel_deadzone_(5.0),
   visual_max_xy_velocity_(20.0),
   visual_data_timeout_sec_(0.13),
+  failure_hold_vertical_velocity_cm_s_(5.0),
   distance_xy_cm_(0.0),
   error_x_cm_(0.0),
   error_y_cm_(0.0),
@@ -161,6 +162,7 @@ PositionPIDController::PositionPIDController()
   error_z_cm_(0.0),
   visual_takeover_active_(false),
   xy_velocity_hold_active_(false),
+  failure_hold_active_(false),
   pillar_detection_valid_(false),
   has_visual_fine_data_(false),
   visual_error_x_px_(0.0),
@@ -191,6 +193,9 @@ PositionPIDController::PositionPIDController()
   xy_velocity_hold_sub_ = create_subscription<std_msgs::msg::Bool>(
     "/xy_velocity_hold_active", takeover_qos,
     std::bind(&PositionPIDController::xyVelocityHoldCallback, this, std::placeholders::_1));
+  failure_hold_sub_ = create_subscription<std_msgs::msg::Bool>(
+    "/failure_hold_active", takeover_qos,
+    std::bind(&PositionPIDController::failureHoldCallback, this, std::placeholders::_1));
   pillar_detection_valid_sub_ = create_subscription<std_msgs::msg::Bool>(
     "/pillar_detection_valid", takeover_qos,
     std::bind(&PositionPIDController::pillarDetectionValidCallback, this, std::placeholders::_1));
@@ -229,7 +234,7 @@ void PositionPIDController::targetPositionCallback(const std_msgs::msg::Float32M
   target_yaw_deg_ = static_cast<double>(msg->data[3]);
   has_target_position_ = true;
 
-  RCLCPP_INFO(get_logger(),
+  RCLCPP_DEBUG(get_logger(),
     "Received target: x=%.1fcm y=%.1fcm z=%.1fcm yaw=%.1fdeg",
     target_x_cm_, target_y_cm_, target_z_cm_, target_yaw_deg_);
 }
@@ -244,7 +249,7 @@ void PositionPIDController::heightCallback(const std_msgs::msg::Int16::SharedPtr
     has_height_filter_candidate_ = false;
     height_filter_candidate_frames_ = 0;
     RCLCPP_ERROR_THROTTLE(
-      get_logger(), *get_clock(), 1000,
+      get_logger(), *get_clock(), 5000,
       "PID rejected out-of-range height: raw=%.1fcm valid_range=[%.1f, %.1f]cm",
       raw_height_cm, height_min_cm_, height_max_cm_);
     return;
@@ -289,8 +294,8 @@ void PositionPIDController::heightCallback(const std_msgs::msg::Int16::SharedPtr
     return;
   }
 
-  RCLCPP_WARN_THROTTLE(
-    get_logger(), *get_clock(), 1000,
+  RCLCPP_DEBUG_THROTTLE(
+    get_logger(), *get_clock(), 5000,
     "PID filtered height jump raw=%.1fcm accepted=%.1fcm delta=%.1fcm candidate_frames=%d/%d",
     raw_height_cm, current_z_cm_, accepted_delta_cm,
     height_filter_candidate_frames_, required_frames);
@@ -327,6 +332,25 @@ void PositionPIDController::xyVelocityHoldCallback(const std_msgs::msg::Bool::Sh
     get_logger(),
     "XY velocity hold changed: %s",
     xy_velocity_hold_active_ ? "active" : "inactive");
+}
+
+void PositionPIDController::failureHoldCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  // Failure hold is intentionally irreversible for this process lifetime.
+  if (!msg->data || failure_hold_active_) {
+    return;
+  }
+
+  failure_hold_active_ = true;
+  pid_yaw_.reset();
+  pid_z_.reset();
+  pid_xy_speed_.reset();
+  pid_visual_x_.reset();
+  pid_visual_y_.reset();
+  RCLCPP_ERROR(
+    get_logger(),
+    "Permanent failure hold enabled: /target_velocity=[0, 0, %.1f, 0]cm/s until process shutdown.",
+    failure_hold_vertical_velocity_cm_s_);
 }
 
 void PositionPIDController::pillarDetectionValidCallback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -486,12 +510,23 @@ std_msgs::msg::Float32MultiArray PositionPIDController::processPID(double dt)
 
 void PositionPIDController::controlTimerCallback()
 {
+  if (failure_hold_active_) {
+    std_msgs::msg::Float32MultiArray failure_cmd;
+    failure_cmd.data = {
+      0.0F,
+      0.0F,
+      static_cast<float>(failure_hold_vertical_velocity_cm_s_),
+      0.0F};
+    target_velocity_pub_->publish(failure_cmd);
+    return;
+  }
+
   // Before route stage 1 is released there is deliberately no target position.
   // Do not publish even a zero /target_velocity here: the flight controller treats
   // the first target-velocity frame as the command to start the flight mission.
   if (!has_target_position_) {
-    RCLCPP_INFO_THROTTLE(
-      get_logger(), *get_clock(), 2000,
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 5000,
       "Waiting for /target_position. /target_velocity remains silent.");
     return;
   }
@@ -500,8 +535,8 @@ void PositionPIDController::controlTimerCallback()
     std_msgs::msg::Float32MultiArray blocked_cmd;
     blocked_cmd.data = {0.0F, 0.0F, 0.0F, 0.0F};
     target_velocity_pub_->publish(blocked_cmd);
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 1000,
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 5000,
       "Pillar input is invalid. Sending safe hold velocity [0, 0, 0, 0].");
     return;
   }
@@ -577,6 +612,8 @@ void PositionPIDController::loadParameters()
   visual_pixel_deadzone_ = declare_parameter<double>("visual_pixel_deadzone", 5.0);
   visual_max_xy_velocity_ = declare_parameter<double>("visual_max_xy_velocity", 20.0);
   visual_data_timeout_sec_ = declare_parameter<double>("visual_data_timeout_sec", 0.13);
+  failure_hold_vertical_velocity_cm_s_ =
+    declare_parameter<double>("failure_hold_vertical_velocity_cm_s", 5.0);
 
   pid_yaw_.setPID(kp_yaw, ki_yaw, kd_yaw);
   pid_z_.setPID(kp_z, ki_z, kd_z);
@@ -604,6 +641,10 @@ void PositionPIDController::loadParameters()
   RCLCPP_INFO(get_logger(),
     "Velocity limits: linear=%.1fcm/s angular=%.1fdeg/s vertical=%.1fcm/s",
     max_linear_vel_, max_angular_vel_, max_vertical_vel_);
+  RCLCPP_INFO(
+    get_logger(),
+    "Permanent failure hold velocity: [0, 0, %.1f, 0]cm/s",
+    failure_hold_vertical_velocity_cm_s_);
 }
 
 }  // 命名空间 pid_control_pkg

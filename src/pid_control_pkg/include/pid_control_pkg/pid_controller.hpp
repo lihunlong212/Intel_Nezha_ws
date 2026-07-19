@@ -67,6 +67,7 @@ private:
   void heightCallback(const std_msgs::msg::Int16::SharedPtr msg);
   void visualTakeoverCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void xyVelocityHoldCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void failureHoldCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void pillarDetectionValidCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void fineDataCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg);
   void controlTimerCallback();
@@ -85,6 +86,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Int16>::SharedPtr height_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr visual_takeover_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr xy_velocity_hold_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr failure_hold_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pillar_detection_valid_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr fine_data_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr target_velocity_pub_;
@@ -136,6 +138,7 @@ private:
   double visual_pixel_deadzone_;
   double visual_max_xy_velocity_;
   double visual_data_timeout_sec_;
+  double failure_hold_vertical_velocity_cm_s_;
 
   double distance_xy_cm_;
   double error_x_cm_;
@@ -145,6 +148,7 @@ private:
 
   bool visual_takeover_active_;
   bool xy_velocity_hold_active_;
+  bool failure_hold_active_;
   bool pillar_detection_valid_;
   bool has_visual_fine_data_;
   double visual_error_x_px_;
