@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -17,6 +19,9 @@ def generate_launch_description() -> LaunchDescription:
         "vision_mode_topic": "/vision_target_mode",
         "apriltag_dictionary": "DICT_APRILTAG_36h11",
         "apriltag_target_id": "1",
+        "tuning_file": str(
+            Path.home() / ".config" / "nezha" / "apriltag_detector.yaml"
+        ),
     }
     arguments = [
         DeclareLaunchArgument(name, default_value=value)
@@ -32,6 +37,7 @@ def generate_launch_description() -> LaunchDescription:
         "fine_data_topic": LaunchConfiguration("fine_data_topic"),
         "vision_mode_topic": LaunchConfiguration("vision_mode_topic"),
         "apriltag_dictionary": LaunchConfiguration("apriltag_dictionary"),
+        "tuning_file": LaunchConfiguration("tuning_file"),
         "apriltag_target_id": ParameterValue(
             LaunchConfiguration("apriltag_target_id"), value_type=int
         ),

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -13,7 +15,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("fps", default_value="15.0"),
         DeclareLaunchArgument("target_id", default_value="-1"),
         DeclareLaunchArgument(
-            "output_file", default_value="/tmp/apriltag_tuned.yaml"
+            "output_file",
+            default_value=str(
+                Path.home() / ".config" / "nezha" / "apriltag_detector.yaml"
+            ),
         ),
     ]
 

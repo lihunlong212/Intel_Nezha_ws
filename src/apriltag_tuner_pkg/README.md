@@ -25,10 +25,13 @@ GUI controls:
 
 Keyboard:
 
-- `s`: save current values to `output_file` (default `/tmp/apriltag_tuned.yaml`).
+- `s`: save current values to `output_file` (default
+  `~/.config/nezha/apriltag_detector.yaml`). The production camera automatically
+  reads this same file on its next startup.
 - `r`: restore robust starting values.
 - `space`: pause/resume the camera image while retaining live slider adjustment.
 - `q` or `Esc`: quit.
 
-The saved YAML is a tuning report. It is not loaded by the production camera node
-until the chosen values are deliberately migrated into its configuration.
+The saved target mode and target ID are only a tuning record. Production pickup ID
+selection still comes from the active order; only detector and preprocessing values
+are applied by the production camera.

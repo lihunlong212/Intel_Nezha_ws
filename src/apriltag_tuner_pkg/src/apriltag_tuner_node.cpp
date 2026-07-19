@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -58,7 +59,8 @@ public:
     frame_height_(declare_parameter<int>("frame_height", 480)),
     requested_fps_(declare_parameter<double>("fps", 15.0)),
     initial_target_id_(declare_parameter<int>("target_id", -1)),
-    output_file_(declare_parameter<std::string>("output_file", "/tmp/apriltag_tuned.yaml")),
+    output_file_(declare_parameter<std::string>(
+      "output_file", "/tmp/apriltag_detector.yaml")),
     dictionary_(cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11)),
     detector_parameters_(cv::aruco::DetectorParameters::create())
   {
@@ -361,50 +363,58 @@ private:
   void saveSettings()
   {
     updateDetectorParameters();
-    std::ofstream output(output_file_);
-    if (!output.is_open()) {
+    const std::filesystem::path output_path(output_file_);
+    if (output_path.has_parent_path()) {
+      std::error_code error;
+      std::filesystem::create_directories(output_path.parent_path(), error);
+      if (error) {
+        RCLCPP_ERROR(
+          get_logger(), "Cannot create tuning directory %s: %s",
+          output_path.parent_path().string().c_str(), error.message().c_str());
+        return;
+      }
+    }
+
+    cv::FileStorage output(output_file_, cv::FileStorage::WRITE);
+    if (!output.isOpened()) {
       RCLCPP_ERROR(get_logger(), "Cannot write tuning file: %s", output_file_.c_str());
       return;
     }
-    output << std::fixed << std::setprecision(4);
-    output << "apriltag_tuner:\n";
-    output << "  dictionary: DICT_APRILTAG_36h11\n";
-    output << "  target_mode: " << target_mode_ << "\n";
-    output << "  target_id: " << target_id_ << "\n";
-    output << "  adaptive_thresh_win_size_min: "
-           << detector_parameters_->adaptiveThreshWinSizeMin << "\n";
-    output << "  adaptive_thresh_win_size_max: "
-           << detector_parameters_->adaptiveThreshWinSizeMax << "\n";
-    output << "  adaptive_thresh_win_size_step: "
-           << detector_parameters_->adaptiveThreshWinSizeStep << "\n";
-    output << "  adaptive_thresh_constant: "
-           << detector_parameters_->adaptiveThreshConstant << "\n";
-    output << "  min_marker_perimeter_rate: "
-           << detector_parameters_->minMarkerPerimeterRate << "\n";
-    output << "  max_marker_perimeter_rate: "
-           << detector_parameters_->maxMarkerPerimeterRate << "\n";
-    output << "  polygonal_approx_accuracy_rate: "
-           << detector_parameters_->polygonalApproxAccuracyRate << "\n";
-    output << "  min_corner_distance_rate: "
-           << detector_parameters_->minCornerDistanceRate << "\n";
-    output << "  min_distance_to_border: "
-           << detector_parameters_->minDistanceToBorder << "\n";
-    output << "  corner_refinement_method: "
-           << detector_parameters_->cornerRefinementMethod << "\n";
-    output << "  corner_refinement_win_size: "
-           << detector_parameters_->cornerRefinementWinSize << "\n";
-    output << "  error_correction_rate: "
-           << detector_parameters_->errorCorrectionRate << "\n";
-    output << "  detect_inverted_marker: "
-           << (detector_parameters_->detectInvertedMarker ? "true" : "false") << "\n";
-    output << "  perspective_remove_pixel_per_cell: "
-           << detector_parameters_->perspectiveRemovePixelPerCell << "\n";
-    output << "  perspective_remove_ignored_margin_per_cell: "
-           << detector_parameters_->perspectiveRemoveIgnoredMarginPerCell << "\n";
-    output << "  clahe_clip_limit: " << static_cast<double>(clahe_x10_) / 10.0 << "\n";
-    output << "  sharpen_amount: " << static_cast<double>(sharpen_x10_) / 10.0 << "\n";
-    output << "  blur_radius: " << blur_radius_ << "\n";
-    output.close();
+    output << "apriltag_tuner" << "{";
+    output << "dictionary" << "DICT_APRILTAG_36h11";
+    output << "target_mode" << target_mode_;
+    output << "target_id" << target_id_;
+    output << "adaptive_thresh_win_size_min"
+           << detector_parameters_->adaptiveThreshWinSizeMin;
+    output << "adaptive_thresh_win_size_max"
+           << detector_parameters_->adaptiveThreshWinSizeMax;
+    output << "adaptive_thresh_win_size_step"
+           << detector_parameters_->adaptiveThreshWinSizeStep;
+    output << "adaptive_thresh_constant"
+           << detector_parameters_->adaptiveThreshConstant;
+    output << "min_marker_perimeter_rate"
+           << detector_parameters_->minMarkerPerimeterRate;
+    output << "max_marker_perimeter_rate"
+           << detector_parameters_->maxMarkerPerimeterRate;
+    output << "polygonal_approx_accuracy_rate"
+           << detector_parameters_->polygonalApproxAccuracyRate;
+    output << "min_corner_distance_rate"
+           << detector_parameters_->minCornerDistanceRate;
+    output << "min_distance_to_border" << detector_parameters_->minDistanceToBorder;
+    output << "corner_refinement_method" << detector_parameters_->cornerRefinementMethod;
+    output << "corner_refinement_win_size" << detector_parameters_->cornerRefinementWinSize;
+    output << "error_correction_rate" << detector_parameters_->errorCorrectionRate;
+    output << "detect_inverted_marker"
+           << static_cast<int>(detector_parameters_->detectInvertedMarker);
+    output << "perspective_remove_pixel_per_cell"
+           << detector_parameters_->perspectiveRemovePixelPerCell;
+    output << "perspective_remove_ignored_margin_per_cell"
+           << detector_parameters_->perspectiveRemoveIgnoredMarginPerCell;
+    output << "clahe_clip_limit" << static_cast<double>(clahe_x10_) / 10.0;
+    output << "sharpen_amount" << static_cast<double>(sharpen_x10_) / 10.0;
+    output << "blur_radius" << blur_radius_;
+    output << "}";
+    output.release();
     RCLCPP_INFO(get_logger(), "Saved current AprilTag tuning to %s", output_file_.c_str());
   }
 
