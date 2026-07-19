@@ -213,11 +213,16 @@ def load_drone_config(config_file: str | Path | None = None) -> tuple[Path, dict
         raise DroneConfigError(f"vision.apriltag_dictionary must be {VALID_APRILTAG_DICTIONARIES[0]}")
     _validate_tag_id(vision.get("default_pickup_apriltag_id"), "vision.default_pickup_apriltag_id")
 
-    for axis in ("x", "y"):
-        minimum = _number(pillar, f"{axis}_min_m", "pillar_detection")
-        maximum = _number(pillar, f"{axis}_max_m", "pillar_detection")
-        if minimum > maximum:
-            raise DroneConfigError(f"pillar_detection.{axis}_min_m must be <= {axis}_max_m")
+    for pillar_device_id in VALID_DEVICE_IDS:
+        region_path = f"pillar_detection.{pillar_device_id}"
+        region = _mapping(pillar, pillar_device_id, "pillar_detection")
+        for axis in ("x", "y"):
+            endpoint_a = _number(region, f"{axis}_min_m", region_path)
+            endpoint_b = _number(region, f"{axis}_max_m", region_path)
+            # Treat both configured values as endpoints. This accepts arbitrary
+            # signed coordinates and also tolerates reversed input order.
+            region[f"{axis}_min_m"] = min(endpoint_a, endpoint_b)
+            region[f"{axis}_max_m"] = max(endpoint_a, endpoint_b)
 
     min_cm = _number(height_filter, "min_cm", "height_filter")
     max_cm = _number(height_filter, "max_cm", "height_filter")
@@ -275,6 +280,10 @@ def load_drone_config(config_file: str | Path | None = None) -> tuple[Path, dict
 
 def selected_route(config: dict[str, Any]) -> dict[str, Any]:
     return config["routes"][str(config["drone"]["device_id"])]
+
+
+def selected_pillar_region(config: dict[str, Any]) -> dict[str, Any]:
+    return config["pillar_detection"][str(config["drone"]["device_id"])]
 
 
 def fallback_transit_y_cm(config: dict[str, Any]) -> float:

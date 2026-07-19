@@ -49,8 +49,8 @@ public:
       "apriltag_dictionary", "DICT_APRILTAG_36h11")),
     apriltag_target_id_(declare_parameter<int>("apriltag_target_id", 1)),
     tuning_file_(declare_parameter<std::string>("tuning_file", defaultTuningFile())),
-    clahe_clip_limit_(0.0),
-    sharpen_amount_(0.0),
+    clahe_clip_limit_(2.0),
+    sharpen_amount_(1.0),
     blur_radius_(0),
     tuning_loaded_(false),
     vision_target_mode_(kVisionModeIdle)
@@ -64,6 +64,7 @@ public:
     }
     apriltag_dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11);
     apriltag_parameters_ = cv::aruco::DetectorParameters::create();
+    applyEnhancedDetectorDefaults(apriltag_parameters_);
     loadTuningFile();
 
     fine_data_pub_ =
@@ -102,7 +103,7 @@ public:
       get_logger(),
       "AprilTag tuning: source=%s adaptive=%d..%d/%d corner_refine=%d "
       "CLAHE=%.1f sharpen=%.1f blur_radius=%d",
-      tuning_loaded_ ? tuning_file_.c_str() : "OpenCV defaults",
+      tuning_loaded_ ? tuning_file_.c_str() : "enhanced built-in defaults",
       apriltag_parameters_->adaptiveThreshWinSizeMin,
       apriltag_parameters_->adaptiveThreshWinSizeMax,
       apriltag_parameters_->adaptiveThreshWinSizeStep,
@@ -122,6 +123,26 @@ public:
   }
 
 private:
+  static void applyEnhancedDetectorDefaults(
+    const cv::Ptr<cv::aruco::DetectorParameters> & parameters)
+  {
+    parameters->adaptiveThreshWinSizeMin = 3;
+    parameters->adaptiveThreshWinSizeMax = 53;
+    parameters->adaptiveThreshWinSizeStep = 4;
+    parameters->adaptiveThreshConstant = 7.0;
+    parameters->minMarkerPerimeterRate = 0.020;
+    parameters->maxMarkerPerimeterRate = 4.0;
+    parameters->polygonalApproxAccuracyRate = 0.030;
+    parameters->minCornerDistanceRate = 0.030;
+    parameters->minDistanceToBorder = 3;
+    parameters->cornerRefinementMethod = 3;
+    parameters->cornerRefinementWinSize = 5;
+    parameters->errorCorrectionRate = 0.60;
+    parameters->detectInvertedMarker = false;
+    parameters->perspectiveRemovePixelPerCell = 6;
+    parameters->perspectiveRemoveIgnoredMarginPerCell = 0.13;
+  }
+
   void loadTuningFile()
   {
     if (tuning_file_.empty()) {
@@ -132,7 +153,7 @@ private:
     if (!input.isOpened()) {
       RCLCPP_WARN(
         get_logger(),
-        "AprilTag tuning file not found: %s. Using OpenCV defaults; run apriltag_tuner and press s.",
+        "AprilTag tuning file not found: %s. Using enhanced defaults; run apriltag_tuner and press s.",
         tuning_file_.c_str());
       return;
     }
@@ -140,15 +161,17 @@ private:
     const cv::FileNode root = input["apriltag_tuner"];
     if (root.empty() || !root.isMap()) {
       RCLCPP_WARN(
-        get_logger(), "Invalid AprilTag tuning file %s: missing apriltag_tuner map. Using defaults.",
+        get_logger(),
+        "Invalid AprilTag tuning file %s: missing apriltag_tuner map. Using enhanced defaults.",
         tuning_file_.c_str());
       return;
     }
 
     auto tuned = cv::aruco::DetectorParameters::create();
-    double tuned_clahe = 0.0;
-    double tuned_sharpen = 0.0;
-    int tuned_blur_radius = 0;
+    applyEnhancedDetectorDefaults(tuned);
+    double tuned_clahe = clahe_clip_limit_;
+    double tuned_sharpen = sharpen_amount_;
+    int tuned_blur_radius = blur_radius_;
     int tuned_detect_inverted = 0;
 
     const auto read_int = [&root](const char * key, int & value) {

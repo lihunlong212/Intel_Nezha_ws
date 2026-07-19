@@ -19,6 +19,7 @@ from my_launch.config_loader import (
     DroneConfigError,
     load_drone_config,
     resolve_config_path,
+    selected_pillar_region,
 )
 
 
@@ -38,6 +39,7 @@ def _launch_demo(context: LaunchContext) -> list[Any]:
     requested_config = LaunchConfiguration("config_file").perform(context)
     config_path, config = load_drone_config(requested_config)
     hardware = config["hardware"]
+    pillar_region = selected_pillar_region(config)
     destination_key = LaunchConfiguration("destination_key").perform(context).strip()
     if destination_key not in VALID_ROUTE_DESTINATIONS:
         raise DroneConfigError(
@@ -81,10 +83,10 @@ def _launch_demo(context: LaunchContext) -> list[Any]:
                         "pillar_detector_pkg",
                         "pillar_detector.launch.py",
                         {
-                            "x_min_m": str(config["pillar_detection"]["x_min_m"]),
-                            "x_max_m": str(config["pillar_detection"]["x_max_m"]),
-                            "y_min_m": str(config["pillar_detection"]["y_min_m"]),
-                            "y_max_m": str(config["pillar_detection"]["y_max_m"]),
+                            "x_min_m": str(pillar_region["x_min_m"]),
+                            "x_max_m": str(pillar_region["x_max_m"]),
+                            "y_min_m": str(pillar_region["y_min_m"]),
+                            "y_max_m": str(pillar_region["y_max_m"]),
                         },
                     )
                 ],

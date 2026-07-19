@@ -21,10 +21,21 @@ vision:
 
 pillar_detection:
   # 雷达/起飞点坐标系，x 向前、y 向左；只保留此矩形范围内的柱子点（m）。
-  x_min_m: 0.20
-  x_max_m: 1.00
-  y_min_m: 0.40
-  y_max_m: 3.60
+  drone1:
+    x_min_m: 0.20
+    x_max_m: 1.00
+    y_min_m: 0.40
+    y_max_m: 3.60
+  drone2:
+    x_min_m: 0.70
+    x_max_m: 1.50
+    y_min_m: -3.60
+    y_max_m: -0.40
+  drone3:
+    x_min_m: 1.40
+    x_max_m: 2.10
+    y_min_m: 0.40
+    y_max_m: 3.60
 
 height_filter:
   # /height 合法范围，范围外数据直接丢弃。

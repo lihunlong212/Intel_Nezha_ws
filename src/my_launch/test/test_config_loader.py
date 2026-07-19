@@ -10,6 +10,7 @@ from my_launch.config_loader import (
     load_drone_config,
     pid_parameters,
     route_parameters,
+    selected_pillar_region,
     target_apriltag_id_for_item,
 )
 
@@ -55,6 +56,45 @@ def test_device_selects_route_and_fallback(tmp_path, device_id, expected_y):
     _, loaded = load_drone_config(_write_config(tmp_path, config))
     assert fallback_transit_y_cm(loaded) == expected_y
     assert route_parameters(loaded)["mission_x_cm"][0] == expected_y
+
+
+@pytest.mark.parametrize(
+    ("device_id", "expected_region"),
+    (
+        ("drone1", (0.20, 1.00, 0.40, 3.60)),
+        ("drone2", (0.20, 1.00, -3.60, -0.40)),
+        ("drone3", (0.20, 1.00, 0.40, 3.60)),
+    ),
+)
+def test_device_selects_independent_pillar_region(tmp_path, device_id, expected_region):
+    config = _base_config()
+    config["drone"]["device_id"] = device_id
+    _, loaded = load_drone_config(_write_config(tmp_path, config))
+    region = selected_pillar_region(loaded)
+    assert (
+        region["x_min_m"],
+        region["x_max_m"],
+        region["y_min_m"],
+        region["y_max_m"],
+    ) == expected_region
+
+
+def test_reversed_pillar_endpoints_are_normalized(tmp_path):
+    config = _base_config()
+    config["drone"]["device_id"] = "drone2"
+    config["pillar_detection"]["drone2"].update(
+        x_min_m=1.25,
+        x_max_m=-0.25,
+        y_min_m=0.40,
+        y_max_m=-3.60,
+    )
+    _, loaded = load_drone_config(_write_config(tmp_path, config))
+    assert selected_pillar_region(loaded) == {
+        "x_min_m": -0.25,
+        "x_max_m": 1.25,
+        "y_min_m": -3.60,
+        "y_max_m": 0.40,
+    }
 
 
 def test_each_drone_has_two_independent_destination_branches():
@@ -104,7 +144,8 @@ def test_task_apriltag_mapping_has_no_unknown_fallback():
         lambda c: c["pid"].update(failure_hold_vertical_velocity_cm_s=0.0),
         lambda c: c["vision"].update(apriltag_dictionary="DICT_4X4_50"),
         lambda c: c["tasks"]["huawei"].update(target_apriltag_id=999),
-        lambda c: c["pillar_detection"].update(x_min_m=2.0, x_max_m=1.0),
+        lambda c: c["pillar_detection"]["drone1"].update(x_min_m="invalid"),
+        lambda c: c["pillar_detection"].pop("drone3"),
         lambda c: c["routes"]["drone1"]["mission_prefix"][0].update(y_cm="bad_placeholder"),
         lambda c: c["routes"]["drone1"]["mission_prefix"][0].update(stage="delivery"),
         lambda c: c["routes"]["drone1"]["destinations"].pop("car1_home"),
